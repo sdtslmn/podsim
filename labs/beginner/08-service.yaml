@@ -1,0 +1,63 @@
+id: 08-service
+title: Expose a Deployment with a Service
+level: beginner
+minutes: 12
+tracks: [kcna, ckad, cka]
+topic: Services
+intro: |
+  Pods come and go, and each new Pod gets a new IP address. A Service gives
+  a set of Pods one stable name and IP. It finds its Pods with a label
+  selector and keeps a list of their addresses in an Endpoints object.
+
+  The Deployment `catalog` is running 2 nginx Pods that listen on port 80.
+  Other apps want to reach it on port 8080.
+setup:
+  - kubectl create deployment catalog --image=nginx:1.27 --replicas=2 --port=80
+tasks:
+  - Create a ClusterIP Service named `catalog-svc` that listens on port `8080` and sends traffic to port `80` of the catalog Pods.
+  - Check that the Service has 2 endpoints.
+  - "Test it from a temporary Pod: kubectl run test --rm -it --image=busybox --restart=Never -- wget -qO- http://catalog-svc:8080"
+checks:
+  - name: Service catalog-svc exists
+    kind: Service
+    resource: catalog-svc
+    expect: exists
+  - name: It is a ClusterIP Service
+    kind: Service
+    resource: catalog-svc
+    path: .spec.type
+    equals: ClusterIP
+  - name: It listens on port 8080
+    kind: Service
+    resource: catalog-svc
+    path: .spec.ports[0].port
+    equals: 8080
+  - name: It forwards to port 80
+    kind: Service
+    resource: catalog-svc
+    path: .spec.ports[0].targetPort
+    equals: 80
+  - name: It selects the catalog Pods
+    kind: Service
+    resource: catalog-svc
+    path: .spec.selector.app
+    equals: catalog
+  - name: It has 2 ready endpoints
+    kind: Endpoints
+    resource: catalog-svc
+    path: .subsets[0].addresses[1].ip
+    matches: "^10\\.244\\."
+  - name: A client Pod gets the nginx page through the Service
+    command: kubectl run lab-check --rm -it --image=busybox --restart=Never -- wget -qO- -T 2 http://catalog-svc:8080
+    outputMatches: Welcome to nginx
+hints:
+  - "kubectl expose creates a Service for an existing Deployment and copies its selector."
+  - "--port is the Service port, --target-port is the container port."
+  - "kubectl expose deployment catalog --name=catalog-svc --port=8080 --target-port=80"
+solution:
+  - kubectl expose deployment catalog --name=catalog-svc --port=8080 --target-port=80
+learned: |
+  Inside the cluster the Service is reachable as catalog-svc (same namespace),
+  catalog-svc.default, or catalog-svc.default.svc.cluster.local. When a Service
+  has no endpoints, check that its selector matches the Pod labels and that the
+  Pods are ready: kubectl get endpoints catalog-svc and kubectl get pods --show-labels.

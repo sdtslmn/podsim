@@ -1,0 +1,660 @@
+// A tiny shell around kubectl: variables, aliases, pipes, redirects,
+// heredocs and the handful of Unix tools people pipe kubectl output into
+// (grep, head, tail, wc, awk, cut, sort, base64, xargs ...). It runs the
+// same in Node and in the browser.
+
+import type { FileSystem } from "./fs.js";
+import type { Cluster } from "./cluster.js";
+import { Kubectl, type IO } from "./kubectl/index.js";
+import { toBase64, fromBase64 } from "./cluster.js";
+
+export type ExtraCommand = (args: string[], io: IO) => Promise<number> | number;
+
+interface Word {
+  text: string;
+}
+type Token = { type: "word"; value: string } | { type: "op"; value: string };
+
+export interface ShellOptions {
+  /** Extra commands such as lab helpers (check, hint, ...). */
+  commands?: Record<string, ExtraCommand>;
+  /** Called for vi/vim/nano/code. Return true if the host handled it. */
+  openEditor?: (path: string) => Promise<boolean> | boolean;
+}
+
+const NOOP_COMMANDS = new Set(["source", ".", "complete", "set", "shopt", "bind", "history", "unset", "hash", "type"]);
+
+export class Shell {
+  readonly kubectl: Kubectl;
+  readonly vars = new Map<string, string>();
+  readonly aliases = new Map<string, string>([["k", "kubectl"]]);
+  private commands: Record<string, ExtraCommand>;
+
+  constructor(
+    readonly cluster: Cluster,
+    readonly fs: FileSystem,
+    private opts: ShellOptions = {},
+  ) {
+    this.kubectl = new Kubectl(cluster, fs);
+    this.commands = opts.commands ?? {};
+    this.vars.set("HOME", "/root");
+    this.vars.set("USER", "root");
+  }
+
+  registerCommand(name: string, fn: ExtraCommand): void {
+    this.commands[name] = fn;
+  }
+
+  /** True when the text so far opens a heredoc, a quote or ends with a backslash. */
+  needsMoreInput(text: string): boolean {
+    const lines = text.split("\n");
+    if (/\\$/.test(lines[lines.length - 1])) return true;
+    let i = 0;
+    while (i < lines.length) {
+      const h = heredocOf(lines[i]);
+      if (h) {
+        let j = i + 1;
+        while (j < lines.length && (h.strip ? lines[j].replace(/^\t+/, "") : lines[j]) !== h.delim) j++;
+        if (j >= lines.length) return true;
+        i = j + 1;
+        continue;
+      }
+      i++;
+    }
+    return unbalancedQuotes(text.replace(/<<-?\s*['"]?(\w+)['"]?[\s\S]*?\n\1(\n|$)/g, ""));
+  }
+
+  /** Execute one or more lines of input. Returns the exit code of the last command. */
+  async exec(input: string, io: IO): Promise<number> {
+    const lines = input.replace(/\r/g, "").split("\n");
+    let code = 0;
+    let i = 0;
+    while (i < lines.length) {
+      let line = lines[i++];
+      while (line.endsWith("\\") && i < lines.length) line = line.slice(0, -1) + " " + lines[i++];
+      if (!line.trim() || line.trim().startsWith("#")) continue;
+      let heredoc: string | undefined;
+      const h = heredocOf(line);
+      if (h) {
+        const body: string[] = [];
+        while (i < lines.length && (h.strip ? lines[i].replace(/^\t+/, "") : lines[i]) !== h.delim) {
+          body.push(h.strip ? lines[i].replace(/^\t+/, "") : lines[i]);
+          i++;
+        }
+        i++;
+        heredoc = body.join("\n") + "\n";
+        if (!h.quoted) heredoc = this.expandVars(heredoc);
+        line = line.replace(/<<-?\s*['"]?\w+['"]?/, "");
+      }
+      code = await this.runLine(line, io, heredoc);
+    }
+    return code;
+  }
+
+  private expandVars(text: string): string {
+    return text.replace(/\$\{(\w+)\}|\$(\w+)/g, (_, a, b) => this.vars.get(a ?? b) ?? "");
+  }
+
+  private tokenize(line: string): Token[] {
+    const tokens: Token[] = [];
+    let cur = "";
+    let has = false;
+    const push = () => {
+      if (cur || has) tokens.push({ type: "word", value: cur });
+      cur = "";
+      has = false;
+    };
+    for (let i = 0; i < line.length; i++) {
+      const ch = line[i];
+      if (ch === "'") {
+        const end = line.indexOf("'", i + 1);
+        cur += line.slice(i + 1, end < 0 ? undefined : end);
+        has = true;
+        i = end < 0 ? line.length : end;
+        continue;
+      }
+      if (ch === '"') {
+        let j = i + 1;
+        let buf = "";
+        while (j < line.length && line[j] !== '"') {
+          if (line[j] === "\\" && j + 1 < line.length && ['"', "\\", "$"].includes(line[j + 1])) {
+            buf += line[j + 1];
+            j += 2;
+            continue;
+          }
+          buf += line[j++];
+        }
+        cur += this.expandVars(buf);
+        has = true;
+        i = j;
+        continue;
+      }
+      if (ch === "\\" && i + 1 < line.length) {
+        cur += line[++i];
+        continue;
+      }
+      if (ch === "$") {
+        const m = line.slice(i).match(/^\$\{(\w+)\}|^\$(\w+)/);
+        if (m) {
+          const value = this.vars.get(m[1] ?? m[2]) ?? "";
+          // Unquoted expansion splits on whitespace, like a real shell.
+          const parts = value.split(/\s+/);
+          parts.forEach((p, idx) => {
+            if (idx > 0) push();
+            cur += p;
+            if (p) has = true;
+          });
+          i += m[0].length - 1;
+          continue;
+        }
+      }
+      if (/\s/.test(ch)) {
+        push();
+        continue;
+      }
+      const two = line.slice(i, i + 2);
+      const four = line.slice(i, i + 4);
+      if (four === "2>&1") {
+        push();
+        tokens.push({ type: "op", value: "2>&1" });
+        i += 3;
+        continue;
+      }
+      if (two === "&&" || two === "||" || two === ">>" || two === "2>") {
+        push();
+        tokens.push({ type: "op", value: two });
+        i++;
+        continue;
+      }
+      if (ch === "|" || ch === ";" || ch === ">" || ch === "<" || ch === "&") {
+        push();
+        tokens.push({ type: "op", value: ch });
+        continue;
+      }
+      cur += ch;
+    }
+    push();
+    return tokens;
+  }
+
+  private async runLine(line: string, io: IO, heredoc?: string): Promise<number> {
+    const tokens = this.tokenize(line);
+    // Split into command lists by ; && ||
+    const lists: { tokens: Token[]; op?: string }[] = [];
+    let current: Token[] = [];
+    for (const t of tokens) {
+      if (t.type === "op" && (t.value === ";" || t.value === "&&" || t.value === "||" || t.value === "&")) {
+        lists.push({ tokens: current, op: t.value });
+        current = [];
+      } else current.push(t);
+    }
+    lists.push({ tokens: current });
+    let code = 0;
+    let prevOp: string | undefined;
+    let first = true;
+    for (const l of lists) {
+      if (!first && prevOp === "&&" && code !== 0) {
+        prevOp = l.op;
+        continue;
+      }
+      if (!first && prevOp === "||" && code === 0) {
+        prevOp = l.op;
+        continue;
+      }
+      if (l.tokens.length) code = await this.runPipeline(l.tokens, io, first ? heredoc : undefined);
+      prevOp = l.op;
+      first = false;
+    }
+    return code;
+  }
+
+  private async runPipeline(tokens: Token[], io: IO, heredoc?: string): Promise<number> {
+    const stages: Token[][] = [[]];
+    for (const t of tokens) {
+      if (t.type === "op" && t.value === "|") stages.push([]);
+      else stages[stages.length - 1].push(t);
+    }
+    let stdin: string | undefined = heredoc;
+    let code = 0;
+    for (let s = 0; s < stages.length; s++) {
+      const last = s === stages.length - 1;
+      const words: string[] = [];
+      let outFile: { path: string; append: boolean } | undefined;
+      let errMode: "terminal" | "stdout" | "null" = "terminal";
+      let errFile: string | undefined;
+      const st = stages[s];
+      for (let i = 0; i < st.length; i++) {
+        const t = st[i];
+        if (t.type === "op") {
+          const next = st[i + 1];
+          if (t.value === ">" || t.value === ">>") {
+            if (!next || next.type !== "word") {
+              io.stderr("k8s-sim: syntax error near unexpected token `newline'\n");
+              return 2;
+            }
+            outFile = { path: next.value, append: t.value === ">>" };
+            i++;
+          } else if (t.value === "<") {
+            if (next?.type === "word") {
+              try {
+                stdin = this.fs.readFile(next.value);
+              } catch {
+                io.stderr(`k8s-sim: ${next.value}: No such file or directory\n`);
+                return 1;
+              }
+              i++;
+            }
+          } else if (t.value === "2>&1") errMode = "stdout";
+          else if (t.value === "2>") {
+            if (next?.type === "word") {
+              if (next.value === "/dev/null") errMode = "null";
+              else errFile = next.value;
+              i++;
+            }
+          }
+        } else words.push(t.value);
+      }
+      if (words.length === 0) continue;
+
+      let captured = "";
+      const capture = !last || !!outFile;
+      const stageIO: IO = {
+        stdout: (text) => {
+          if (capture) captured += text;
+          else io.stdout(text);
+        },
+        stderr: (text) => {
+          if (errMode === "stdout") stageIO.stdout(text);
+          else if (errMode === "null") return;
+          else if (errFile) this.fs.appendFile(errFile, text);
+          else io.stderr(text);
+        },
+        stdin,
+        sleep: io.sleep,
+        aborted: io.aborted,
+      };
+      code = await this.runCommand(words, stageIO);
+      if (outFile) {
+        if (outFile.path === "/dev/null") {
+          /* discard */
+        } else if (outFile.append) this.fs.appendFile(outFile.path, captured);
+        else this.fs.writeFile(outFile.path, captured);
+        captured = "";
+      }
+      stdin = captured;
+    }
+    return code;
+  }
+
+  private async runCommand(words: string[], io: IO): Promise<number> {
+    // Variable assignment: FOO=bar
+    if (words.length === 1 && /^\w+=/.test(words[0])) {
+      const idx = words[0].indexOf("=");
+      this.vars.set(words[0].slice(0, idx), words[0].slice(idx + 1));
+      return 0;
+    }
+    let [cmd, ...args] = words;
+    const alias = this.aliases.get(cmd);
+    if (alias) {
+      const parts = alias.split(/\s+/);
+      cmd = parts[0];
+      args = [...parts.slice(1), ...args];
+    }
+    if (this.commands[cmd]) return this.commands[cmd](args, io);
+    const out = (t: string) => io.stdout(t);
+    const lines = (t: string | undefined) => (t ?? "").split("\n").filter((l, i, a) => !(i === a.length - 1 && l === ""));
+    const emit = (ls: string[]) => {
+      if (ls.length) out(ls.join("\n") + "\n");
+    };
+
+    switch (cmd) {
+      case "kubectl":
+        return this.kubectl.run(args, io, words.join(" "));
+      case "export": {
+        for (const a of args) {
+          const idx = a.indexOf("=");
+          if (idx > 0) this.vars.set(a.slice(0, idx), a.slice(idx + 1));
+        }
+        return 0;
+      }
+      case "alias": {
+        if (args.length === 0) {
+          emit([...this.aliases.entries()].map(([k, v]) => `alias ${k}='${v}'`));
+          return 0;
+        }
+        for (const a of args) {
+          const idx = a.indexOf("=");
+          if (idx > 0) this.aliases.set(a.slice(0, idx), a.slice(idx + 1));
+        }
+        return 0;
+      }
+      case "unalias":
+        for (const a of args) this.aliases.delete(a);
+        return 0;
+      case "echo": {
+        let newline = true;
+        let interpret = false;
+        while (args[0] === "-n" || args[0] === "-e") {
+          if (args[0] === "-n") newline = false;
+          if (args[0] === "-e") interpret = true;
+          args = args.slice(1);
+        }
+        let text = args.join(" ");
+        if (interpret) text = text.replace(/\\n/g, "\n").replace(/\\t/g, "\t");
+        out(text + (newline ? "\n" : ""));
+        return 0;
+      }
+      case "cat": {
+        if (args.length === 0) {
+          out(io.stdin ?? "");
+          return 0;
+        }
+        for (const f of args.filter((a) => !a.startsWith("-"))) {
+          if (!this.fs.exists(f)) {
+            io.stderr(`cat: ${f}: No such file or directory\n`);
+            return 1;
+          }
+          if (this.fs.isDirectory(f)) {
+            io.stderr(`cat: ${f}: Is a directory\n`);
+            return 1;
+          }
+          const content = this.fs.readFile(f);
+          out(content.endsWith("\n") || content === "" ? content : content + "\n");
+        }
+        return 0;
+      }
+      case "ls": {
+        const paths = args.filter((a) => !a.startsWith("-"));
+        const target = paths[0] ?? ".";
+        if (!this.fs.exists(target)) {
+          io.stderr(`ls: cannot access '${target}': No such file or directory\n`);
+          return 2;
+        }
+        if (!this.fs.isDirectory(target)) {
+          out(target + "\n");
+          return 0;
+        }
+        emit(this.fs.list(target).filter((n) => n !== ".keep"));
+        return 0;
+      }
+      case "pwd":
+        out(this.fs.cwd() + "\n");
+        return 0;
+      case "cd":
+        io.stderr(`(k8s-sim) cd is not supported. Your files live in ${this.fs.cwd()}\n`);
+        return 1;
+      case "mkdir":
+        for (const a of args.filter((x) => !x.startsWith("-"))) this.fs.mkdir(a);
+        return 0;
+      case "touch":
+        for (const a of args) if (!this.fs.exists(a)) this.fs.writeFile(a, "");
+        return 0;
+      case "rm": {
+        const force = args.some((a) => /^-\w*f/.test(a));
+        for (const a of args.filter((x) => !x.startsWith("-"))) {
+          if (!this.fs.exists(a)) {
+            if (!force) {
+              io.stderr(`rm: cannot remove '${a}': No such file or directory\n`);
+              return 1;
+            }
+            continue;
+          }
+          this.fs.remove(a);
+        }
+        return 0;
+      }
+      case "cp":
+      case "mv": {
+        const [src, dst] = args.filter((a) => !a.startsWith("-"));
+        if (!src || !dst) {
+          io.stderr(`${cmd}: missing file operand\n`);
+          return 1;
+        }
+        if (!this.fs.exists(src)) {
+          io.stderr(`${cmd}: cannot stat '${src}': No such file or directory\n`);
+          return 1;
+        }
+        this.fs.writeFile(dst, this.fs.readFile(src));
+        if (cmd === "mv") this.fs.remove(src);
+        return 0;
+      }
+      case "grep": {
+        const flags = new Set<string>();
+        const rest: string[] = [];
+        for (const a of args) {
+          if (/^-[a-zA-Z]+$/.test(a)) for (const ch of a.slice(1)) flags.add(ch);
+          else rest.push(a);
+        }
+        const pattern = rest[0] ?? "";
+        const input = rest[1] ? (this.fs.exists(rest[1]) ? this.fs.readFile(rest[1]) : "") : io.stdin;
+        let re: RegExp;
+        try {
+          const src = flags.has("F") ? pattern.replace(/[.*+?^${}()|[\]\\]/g, "\\$&") : pattern.replace(/\\\|/g, "|");
+          re = new RegExp(flags.has("w") ? `\\b(?:${src})\\b` : src, flags.has("i") ? "i" : "");
+        } catch {
+          re = new RegExp(pattern.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), flags.has("i") ? "i" : "");
+        }
+        const matched = lines(input).filter((l) => re.test(l) !== flags.has("v"));
+        if (flags.has("c")) out(`${matched.length}\n`);
+        else emit(matched);
+        return matched.length ? 0 : 1;
+      }
+      case "head":
+      case "tail": {
+        let n = 10;
+        let fromStart = false;
+        for (let i = 0; i < args.length; i++) {
+          if (args[i] === "-n") {
+            const v = args[++i] ?? "10";
+            fromStart = v.startsWith("+");
+            n = parseInt(v.replace("+", ""), 10);
+          } else if (/^-\d+$/.test(args[i])) n = parseInt(args[i].slice(1), 10);
+        }
+        const ls = lines(io.stdin);
+        if (cmd === "head") emit(ls.slice(0, n));
+        else emit(fromStart ? ls.slice(n - 1) : ls.slice(-n));
+        return 0;
+      }
+      case "wc": {
+        const text = io.stdin ?? "";
+        if (args.includes("-l")) out(`${lines(text).length}\n`);
+        else if (args.includes("-w")) out(`${text.split(/\s+/).filter(Boolean).length}\n`);
+        else if (args.includes("-c")) out(`${text.length}\n`);
+        else out(`${lines(text).length} ${text.split(/\s+/).filter(Boolean).length} ${text.length}\n`);
+        return 0;
+      }
+      case "sort": {
+        let ls = lines(io.stdin);
+        const kIdx = args.indexOf("-k");
+        const key = kIdx >= 0 ? parseInt(args[kIdx + 1], 10) - 1 : -1;
+        const val = (l: string) => (key >= 0 ? l.trim().split(/\s+/)[key] ?? "" : l);
+        if (args.some((a) => a.includes("n"))) ls = ls.sort((a, b) => parseFloat(val(a)) - parseFloat(val(b)));
+        else ls = ls.sort((a, b) => val(a).localeCompare(val(b)));
+        if (args.some((a) => /^-\w*r/.test(a))) ls.reverse();
+        emit(ls);
+        return 0;
+      }
+      case "uniq": {
+        const ls = lines(io.stdin);
+        const res: { l: string; c: number }[] = [];
+        for (const l of ls) {
+          if (res.length && res[res.length - 1].l === l) res[res.length - 1].c++;
+          else res.push({ l, c: 1 });
+        }
+        emit(args.includes("-c") ? res.map((r) => `${String(r.c).padStart(7)} ${r.l}`) : res.map((r) => r.l));
+        return 0;
+      }
+      case "awk": {
+        const prog = args.find((a) => a.includes("{")) ?? "";
+        const m = prog.match(/^\s*(NR\s*([<>=!]=?|==)\s*(\d+))?\s*\{\s*print\s*(.*?)\s*\}\s*$/);
+        if (!m) {
+          io.stderr("(k8s-sim) only simple awk programs like '{print $1}' are supported\n");
+          return 1;
+        }
+        const fields = m[4] ? m[4].split(/\s*,\s*|\s+/) : ["$0"];
+        const res: string[] = [];
+        lines(io.stdin).forEach((l, idx) => {
+          const nr = idx + 1;
+          if (m[1]) {
+            const v = parseInt(m[3], 10);
+            const op = m[2];
+            const ok = op === ">" ? nr > v : op === "<" ? nr < v : op === ">=" ? nr >= v : op === "<=" ? nr <= v : op === "!=" ? nr !== v : nr === v;
+            if (!ok) return;
+          }
+          const cols = l.trim().split(/\s+/);
+          res.push(
+            fields
+              .map((f) => {
+                if (f === "$0") return l;
+                if (f === "$NF") return cols[cols.length - 1] ?? "";
+                const n = parseInt(f.replace("$", ""), 10);
+                return f.startsWith("$") ? cols[n - 1] ?? "" : f.replace(/^"|"$/g, "");
+              })
+              .join(" "),
+          );
+        });
+        emit(res);
+        return 0;
+      }
+      case "cut": {
+        let delim = "\t";
+        let fieldsSpec = "";
+        for (let i = 0; i < args.length; i++) {
+          if (args[i] === "-d") delim = args[++i];
+          else if (args[i].startsWith("-d")) delim = args[i].slice(2);
+          else if (args[i] === "-f") fieldsSpec = args[++i];
+          else if (args[i].startsWith("-f")) fieldsSpec = args[i].slice(2);
+        }
+        const idx = fieldsSpec.split(",").map((x) => parseInt(x, 10) - 1);
+        emit(lines(io.stdin).map((l) => idx.map((i) => l.split(delim)[i] ?? "").join(delim)));
+        return 0;
+      }
+      case "tr": {
+        const text = io.stdin ?? "";
+        const unescape = (s: string) => s.replace(/\\n/g, "\n").replace(/\\t/g, "\t");
+        if (args[0] === "-d") {
+          const set = unescape(args[1] ?? "");
+          out([...text].filter((c) => !set.includes(c)).join(""));
+        } else {
+          const a = unescape(args[0] ?? "");
+          const b = unescape(args[1] ?? "");
+          out([...text].map((c) => (a.includes(c) ? b[Math.min(a.indexOf(c), b.length - 1)] ?? "" : c)).join(""));
+        }
+        return 0;
+      }
+      case "base64": {
+        const text = io.stdin ?? (args.find((a) => !a.startsWith("-")) && this.fs.exists(args.find((a) => !a.startsWith("-"))!) ? this.fs.readFile(args.find((a) => !a.startsWith("-"))!) : "");
+        if (args.includes("-d") || args.includes("--decode") || args.includes("-D")) out(fromBase64(text.replace(/\s+/g, "")));
+        else out(toBase64(text) + (args.includes("-w0") || args.includes("-w") ? "" : "\n"));
+        return 0;
+      }
+      case "tee": {
+        const file = args.find((a) => !a.startsWith("-"));
+        if (file) {
+          if (args.includes("-a")) this.fs.appendFile(file, io.stdin ?? "");
+          else this.fs.writeFile(file, io.stdin ?? "");
+        }
+        out(io.stdin ?? "");
+        return 0;
+      }
+      case "xargs": {
+        const items = (io.stdin ?? "").split(/\s+/).filter(Boolean);
+        if (args.length === 0) {
+          out(items.join(" ") + "\n");
+          return 0;
+        }
+        return this.runCommand([...args, ...items], { ...io, stdin: undefined });
+      }
+      case "column":
+        out(io.stdin ?? "");
+        return 0;
+      case "sleep": {
+        const secs = Math.min(parseFloat(args[0] ?? "0") || 0, 60);
+        await io.sleep(secs * 1000);
+        return 0;
+      }
+      case "clear":
+        out("\x1b[2J\x1b[H");
+        return 0;
+      case "which":
+        if (args[0] === "kubectl") {
+          out("/usr/bin/kubectl\n");
+          return 0;
+        }
+        return 1;
+      case "true":
+        return 0;
+      case "false":
+        return 1;
+      case "vi":
+      case "vim":
+      case "nano":
+      case "code": {
+        const file = args.find((a) => !a.startsWith("-"));
+        if (file && this.opts.openEditor && (await this.opts.openEditor(file))) return 0;
+        io.stderr(`(k8s-sim) ${cmd} is not available inside the simulator. Edit the file with your own editor (it is in ${this.fs.cwd()}), or write it with a heredoc:\n  cat <<EOF > ${file ?? "pod.yaml"}\n  ...\n  EOF\n`);
+        return 1;
+      }
+      case "watch":
+        io.stderr("(k8s-sim) watch is not simulated yet. Run the command again to refresh.\n");
+        return 1;
+      case "jq":
+      case "yq":
+      case "helm":
+      case "docker":
+      case "crictl":
+      case "systemctl":
+      case "journalctl":
+      case "etcdctl":
+      case "kubeadm":
+      case "ssh":
+      case "curl":
+      case "wget":
+        io.stderr(`(k8s-sim) ${cmd} is not available on the simulator host yet. ${cmd === "curl" || cmd === "wget" ? "Run it inside a pod instead, e.g. kubectl exec POD -- wget -qO- http://SERVICE" : "It is on the roadmap."}\n`);
+        return 127;
+      default:
+        if (NOOP_COMMANDS.has(cmd)) return 0;
+        io.stderr(`k8s-sim: ${cmd}: command not found\n`);
+        return 127;
+    }
+  }
+}
+
+function heredocOf(line: string): { delim: string; strip: boolean; quoted: boolean } | undefined {
+  // Ignore << inside quotes.
+  let quote: string | null = null;
+  for (let i = 0; i < line.length - 1; i++) {
+    const c = line[i];
+    if (quote) {
+      if (c === quote) quote = null;
+      continue;
+    }
+    if (c === "'" || c === '"') {
+      quote = c;
+      continue;
+    }
+    if (c === "<" && line[i + 1] === "<") {
+      const m = line.slice(i).match(/^<<(-?)\s*(['"]?)(\w+)\2/);
+      if (m) return { delim: m[3], strip: m[1] === "-", quoted: !!m[2] };
+    }
+  }
+  return undefined;
+}
+
+function unbalancedQuotes(text: string): boolean {
+  let quote: string | null = null;
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i];
+    if (quote) {
+      if (c === "\\" && quote === '"') {
+        i++;
+        continue;
+      }
+      if (c === quote) quote = null;
+    } else if (c === "'" || c === '"') quote = c;
+    else if (c === "\\") i++;
+  }
+  return quote !== null;
+}
+
+export type { Word };

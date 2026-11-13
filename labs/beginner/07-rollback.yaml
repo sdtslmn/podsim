@@ -1,0 +1,53 @@
+id: 07-rollback
+title: Roll back a broken release
+level: beginner
+minutes: 10
+tracks: [ckad, cka]
+topic: Troubleshooting
+intro: |
+  Someone just released a new version of the Deployment `payments`, and the
+  rollout is stuck. The old Pods are still serving traffic because the
+  rolling update will not remove them until new Pods become ready.
+
+  Find out what is wrong with the new Pods, then roll the Deployment back to
+  the version that worked.
+setup:
+  - kubectl create deployment payments --image=nginx:1.25 --replicas=3
+  - kubectl set image deployment/payments nginx=nginx:1.27-typo
+settle: 30
+tasks:
+  - Find out why the newest `payments` Pod is not starting (kubectl get pods, kubectl describe pod).
+  - Roll the Deployment back to the previous working revision.
+  - Make sure all 3 replicas are ready and run the old image again.
+checks:
+  - name: The Pod template is back on nginx:1.25
+    kind: Deployment
+    resource: payments
+    path: .spec.template.spec.containers[0].image
+    equals: nginx:1.25
+  - name: All 3 replicas are ready
+    kind: Deployment
+    resource: payments
+    path: .status.readyReplicas
+    equals: 3
+  - name: All 3 replicas are on the current template
+    kind: Deployment
+    resource: payments
+    path: .status.updatedReplicas
+    equals: 3
+  - name: No broken Pods are left
+    kind: Pod
+    count:
+      selector: app=payments
+      equals: 3
+hints:
+  - "kubectl get pods shows one Pod in ErrImagePull or ImagePullBackOff. kubectl describe pod on it shows the image it tried to pull."
+  - "kubectl rollout history deployment/payments lists the revisions. kubectl rollout undo goes back one."
+  - "kubectl rollout undo deployment/payments"
+solution:
+  - kubectl rollout undo deployment/payments
+  - kubectl rollout status deployment/payments
+learned: |
+  rollout undo copies the Pod template of an older ReplicaSet back into the
+  Deployment. Use --to-revision=N to jump to a specific revision. In real
+  incidents, roll back first to stop the impact, then investigate.

@@ -1,0 +1,283 @@
+:root {
+  --bg: #f6f7f9;
+  --panel: #ffffff;
+  --text: #1f2328;
+  --muted: #5f6b7a;
+  --border: #d9dee5;
+  --accent: #326ce5;
+  --ok: #1a7f37;
+  --bad: #c62828;
+  --term: #1e1e1e;
+  font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  color: var(--text);
+  background: var(--bg);
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  height: 100%;
+}
+
+body {
+  display: flex;
+  flex-direction: column;
+}
+
+.topbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 16px;
+  background: var(--panel);
+  border-bottom: 1px solid var(--border);
+}
+
+.brand {
+  font-weight: 600;
+  font-family: ui-monospace, "Cascadia Code", Consolas, monospace;
+}
+
+.brand .tag {
+  font-weight: 400;
+  font-family: system-ui, sans-serif;
+  color: var(--muted);
+  font-size: 12px;
+  margin-left: 8px;
+}
+
+nav {
+  display: flex;
+  gap: 4px;
+}
+
+.link {
+  background: none;
+  border: none;
+  color: var(--accent);
+  font: inherit;
+  font-size: 14px;
+  padding: 6px 10px;
+  border-radius: 6px;
+  cursor: pointer;
+  text-decoration: none;
+}
+
+.link:hover,
+.link.active {
+  background: #eaf0fd;
+}
+
+.layout {
+  flex: 1;
+  display: grid;
+  grid-template-columns: minmax(320px, 38%) 1fr;
+  min-height: 0;
+}
+
+.panel {
+  background: var(--panel);
+  border-right: 1px solid var(--border);
+  overflow-y: auto;
+  padding: 16px 20px 32px;
+  font-size: 14px;
+  line-height: 1.5;
+}
+
+.panel h2 {
+  font-size: 18px;
+  margin: 4px 0 4px;
+}
+
+.panel h3 {
+  font-size: 14px;
+  margin: 18px 0 6px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--muted);
+}
+
+.meta {
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.intro {
+  white-space: pre-wrap;
+}
+
+code,
+.cmd {
+  font-family: ui-monospace, "Cascadia Code", Consolas, monospace;
+  font-size: 13px;
+  background: #f0f2f5;
+  padding: 1px 4px;
+  border-radius: 4px;
+}
+
+.tasks {
+  padding-left: 20px;
+  margin: 0;
+}
+
+.tasks li {
+  margin-bottom: 6px;
+}
+
+.actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 16px;
+}
+
+button.btn {
+  font: inherit;
+  font-size: 14px;
+  padding: 6px 14px;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  background: #fff;
+  cursor: pointer;
+}
+
+button.btn.primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
+}
+
+button.btn:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.results {
+  margin-top: 14px;
+  padding: 0;
+  list-style: none;
+}
+
+.results li {
+  padding: 3px 0;
+}
+
+.results .ok::before {
+  content: "✔ ";
+  color: var(--ok);
+}
+
+.results .bad::before {
+  content: "✘ ";
+  color: var(--bad);
+}
+
+.results .detail {
+  color: var(--muted);
+  font-size: 12px;
+  margin-left: 6px;
+}
+
+.notice {
+  margin-top: 12px;
+  padding: 10px 12px;
+  border-radius: 6px;
+  background: #fff8e1;
+  border: 1px solid #f3e1a0;
+  white-space: pre-wrap;
+}
+
+.notice.success {
+  background: #e9f7ef;
+  border-color: #b7e2c6;
+}
+
+.lab-list {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+}
+
+.lab-list li {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 8px;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  margin-bottom: 6px;
+  cursor: pointer;
+}
+
+.lab-list li:hover {
+  border-color: var(--accent);
+}
+
+.lab-list .done::before {
+  content: "✔ ";
+  color: var(--ok);
+}
+
+.files-list {
+  list-style: none;
+  padding: 0;
+}
+
+.files-list li {
+  cursor: pointer;
+  padding: 4px 0;
+  color: var(--accent);
+  font-family: ui-monospace, Consolas, monospace;
+}
+
+textarea.editor {
+  width: 100%;
+  min-height: 320px;
+  font-family: ui-monospace, "Cascadia Code", Consolas, monospace;
+  font-size: 13px;
+  padding: 10px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  resize: vertical;
+}
+
+input.filename {
+  font-family: ui-monospace, Consolas, monospace;
+  font-size: 13px;
+  padding: 5px 8px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  width: 100%;
+  margin-bottom: 8px;
+}
+
+.terminal-wrap {
+  background: var(--term);
+  padding: 8px;
+  min-height: 0;
+  min-width: 0;
+}
+
+#terminal {
+  height: 100%;
+}
+
+@media (max-width: 800px) {
+  .layout {
+    grid-template-columns: 1fr;
+    grid-template-rows: auto 60vh;
+  }
+  .panel {
+    border-right: none;
+    border-bottom: 1px solid var(--border);
+    max-height: 45vh;
+  }
+  .brand .tag {
+    display: none;
+  }
+}

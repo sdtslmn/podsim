@@ -1,0 +1,16 @@
+{
+  "name": "@k8s-sim/cli",
+  "version": "0.1.0",
+  "description": "Terminal Kubernetes training simulator.",
+  "license": "Apache-2.0",
+  "type": "module",
+  "bin": {
+    "k8s-sim": "dist/index.js"
+  },
+  "files": [
+    "dist"
+  ],
+  "dependencies": {
+    "@k8s-sim/core": "0.1.0"
+  }
+}

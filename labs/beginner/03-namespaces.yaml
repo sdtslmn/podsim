@@ -1,0 +1,60 @@
+id: 03-namespaces
+title: Work in a namespace
+level: beginner
+minutes: 8
+tracks: [kcna, ckad, cka]
+topic: Namespaces
+intro: |
+  Namespaces split one cluster into separate areas, for example per team
+  or per environment. Most objects live in a namespace. When you do not
+  say which one, kubectl uses "default".
+
+  Use -n NAME (or --namespace=NAME) on any command to work in another
+  namespace, and -A to see all of them at once.
+tasks:
+  - Create a namespace called `dev`.
+  - In the `dev` namespace, run a Pod named `cache` with the image `redis:7` and the label `app=cache`.
+  - List the Pods in `dev` to confirm it is Running. Notice that `kubectl get pods` without -n does not show it.
+checks:
+  - name: Namespace dev exists
+    kind: Namespace
+    resource: dev
+    expect: exists
+  - name: Pod cache is in the dev namespace
+    kind: Pod
+    resource: cache
+    namespace: dev
+    expect: exists
+  - name: Pod cache runs redis:7
+    kind: Pod
+    resource: cache
+    namespace: dev
+    path: .spec.containers[0].image
+    equals: redis:7
+  - name: Pod cache has the label app=cache
+    kind: Pod
+    resource: cache
+    namespace: dev
+    path: .metadata.labels.app
+    equals: cache
+  - name: Pod cache is Running
+    kind: Pod
+    resource: cache
+    namespace: dev
+    path: .status.phase
+    equals: Running
+  - name: Nothing named cache was created in default by mistake
+    kind: Pod
+    resource: cache
+    namespace: default
+    expect: absent
+hints:
+  - "kubectl create namespace dev"
+  - "kubectl run takes -n too: kubectl run cache --image=redis:7 --labels=app=cache -n dev"
+solution:
+  - kubectl create namespace dev
+  - kubectl run cache --image=redis:7 --labels=app=cache -n dev
+learned: |
+  If you work in one namespace for a while, switch your context to it so you
+  do not have to type -n every time:
+    kubectl config set-context --current --namespace=dev

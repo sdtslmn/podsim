@@ -1,0 +1,41 @@
+id: 01-first-pod
+title: Run your first Pod
+level: beginner
+minutes: 5
+tracks: [kcna, ckad]
+topic: Pods
+intro: |
+  A Pod is the smallest unit Kubernetes runs. It wraps one or more
+  containers that share the same network address and storage.
+
+  The quickest way to start a Pod is `kubectl run`. Kubernetes then
+  picks a node for it (scheduling), pulls the image and starts the
+  container. Watch the STATUS column change from ContainerCreating to
+  Running.
+tasks:
+  - Create a Pod named `web` that runs the `nginx` image.
+  - Check that it reaches the Running state with `kubectl get pods`.
+checks:
+  - name: Pod web exists
+    kind: Pod
+    resource: web
+    expect: exists
+  - name: Pod web uses the nginx image
+    kind: Pod
+    resource: web
+    path: .spec.containers[0].image
+    matches: "^(docker.io/(library/)?)?nginx(:[\\w.-]+)?$"
+  - name: Pod web is Running
+    kind: Pod
+    resource: web
+    path: .status.phase
+    equals: Running
+hints:
+  - "The command you need is kubectl run. It takes the Pod name and an --image flag."
+  - "Try: kubectl run web --image=nginx"
+solution:
+  - kubectl run web --image=nginx
+learned: |
+  kubectl run creates a single Pod. Next time, try `kubectl get pod web -o wide`
+  to see which node it landed on and its IP address, and `kubectl describe pod web`
+  to read the events the scheduler and kubelet recorded.

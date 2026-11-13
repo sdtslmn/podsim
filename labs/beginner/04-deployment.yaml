@@ -1,0 +1,47 @@
+id: 04-deployment
+title: Create a Deployment
+level: beginner
+minutes: 8
+tracks: [kcna, ckad, cka]
+topic: Deployments
+intro: |
+  You rarely run bare Pods in production. A Deployment keeps a set number
+  of identical Pods running. If a Pod dies or a node fails, the Deployment
+  (through a ReplicaSet) creates a replacement.
+
+  The chain is: Deployment -> ReplicaSet -> Pods. Look at all three with
+  `kubectl get deploy,rs,pods`.
+tasks:
+  - Create a Deployment named `frontend` with the image `nginx:1.27` and 3 replicas.
+  - Wait until all 3 Pods are ready.
+  - Delete one of the frontend Pods and watch the Deployment replace it.
+checks:
+  - name: Deployment frontend exists
+    kind: Deployment
+    resource: frontend
+    expect: exists
+  - name: Deployment frontend uses nginx:1.27
+    kind: Deployment
+    resource: frontend
+    path: .spec.template.spec.containers[0].image
+    equals: nginx:1.27
+  - name: Deployment frontend wants 3 replicas
+    kind: Deployment
+    resource: frontend
+    path: .spec.replicas
+    equals: 3
+  - name: All 3 replicas are ready
+    kind: Deployment
+    resource: frontend
+    path: .status.readyReplicas
+    equals: 3
+hints:
+  - "kubectl create deployment takes --image and --replicas."
+  - "kubectl create deployment frontend --image=nginx:1.27 --replicas=3"
+  - "To see self-healing: kubectl delete pod <one of the frontend pods>, then kubectl get pods"
+solution:
+  - kubectl create deployment frontend --image=nginx:1.27 --replicas=3
+learned: |
+  Pod names like frontend-7d9f8b6c5d-x2k4p are made of the Deployment name, the
+  ReplicaSet's pod-template-hash and a random suffix. When you delete a Pod, the
+  ReplicaSet notices it has fewer Pods than it wants and creates a new one.

@@ -51,7 +51,9 @@ export async function cmdRun(ctx: Ctx, f: Flags): Promise<number> {
   const ns = nsOf(ctx, f);
   const restart = f.str("restart") ?? "Always";
   if (!["Always", "OnFailure", "Never"].includes(restart)) throw new KubeError(`error: invalid restart policy: ${restart}`);
-  const labels = f.has("labels", "l") ? parseKV(f.all("labels"), "labels") : { run: name };
+  // -l is --labels for kubectl run (the shared parser reads it as --selector).
+  const labelArgs = [...f.all("labels"), ...f.all("selector")];
+  const labels = labelArgs.length ? parseKV(labelArgs, "labels") : { run: name };
   const container: Record<string, unknown> = { image, name };
   const extra = [...f.args.slice(1), ...f.rest];
   if (extra.length) {
@@ -109,6 +111,11 @@ export async function cmdRun(ctx: Ctx, f: Flags): Promise<number> {
   }
   cluster.advance();
   pod.metadata.namespace = ns;
+  if (f.bool("expose") && !port) throw new KubeError("error: --port must be set when exposing a service");
+  if (f.bool("expose")) {
+    cluster.create({ apiVersion: "v1", kind: "Service", metadata: { name, namespace: ns }, spec: { selector: labels, ports: [{ port: parseInt(port!, 10), protocol: "TCP", targetPort: parseInt(port!, 10) }] } });
+    out(ctx, `service/${name} created`);
+  }
   const created = cluster.create(pod);
   for (const w of cluster.takeWarnings()) err(ctx, `Warning: ${w}`);
   cluster.advance();

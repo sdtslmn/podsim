@@ -1,0 +1,63 @@
+id: ckad-22-network-policy
+title: Allow only the backend to reach the database
+level: intermediate
+minutes: 12
+tracks: [ckad]
+topic: Services and Networking
+intro: |
+  By default every Pod can reach every other Pod. NetworkPolicies restrict
+  that: once a policy selects a Pod for ingress, only the traffic the policy
+  allows gets in.
+
+  The namespace `prod` runs `frontend`, `backend` and a Redis `db` behind
+  the Service `db`.
+setup:
+  - kubectl create namespace prod
+  - kubectl run db -n prod --image=redis:7 -l app=db --port=6379 --expose
+  - kubectl run backend -n prod --image=busybox:1.36 -l app=backend -- sleep 3600
+  - kubectl run frontend -n prod --image=busybox:1.36 -l app=frontend -- sleep 3600
+tasks:
+  - Create a NetworkPolicy named `db-allow-backend` in `prod` that selects the `db` Pod (label `app=db`).
+  - It must allow ingress only from Pods labeled `app=backend`, on TCP port 6379.
+checks:
+  - name: NetworkPolicy db-allow-backend selects app=db
+    kind: NetworkPolicy
+    namespace: prod
+    resource: db-allow-backend
+    path: .spec.podSelector.matchLabels.app
+    equals: db
+  - name: backend can reach db on 6379
+    command: kubectl exec -n prod backend -- nc -z -w 2 db 6379
+    exitCode: 0
+  - name: frontend cannot reach db
+    command: kubectl exec -n prod frontend -- nc -z -w 2 db 6379
+    exitCode: 1
+hints:
+  - "Start from the NetworkPolicy example in the docs: podSelector, policyTypes [Ingress], ingress.from.podSelector and ingress.ports."
+  - "Test with kubectl exec -n prod frontend -- nc -z -w 2 db 6379 (and the same from backend)."
+solution:
+  - |
+    cat <<EOF | kubectl apply -f -
+    apiVersion: networking.k8s.io/v1
+    kind: NetworkPolicy
+    metadata:
+      name: db-allow-backend
+      namespace: prod
+    spec:
+      podSelector:
+        matchLabels:
+          app: db
+      policyTypes: ["Ingress"]
+      ingress:
+      - from:
+        - podSelector:
+            matchLabels:
+              app: backend
+        ports:
+        - protocol: TCP
+          port: 6379
+    EOF
+learned: |
+  Policies are additive: traffic is allowed if any policy that selects the
+  Pod allows it. A podSelector inside from matches Pods in the same
+  namespace; add a namespaceSelector to allow other namespaces.

@@ -1,6 +1,6 @@
 # PodSim
 
-A Kubernetes training simulator for new learners. Practice `kubectl` on a simulated cluster, in your terminal or in the browser, with guided labs that check your work automatically.
+A Kubernetes training simulator. Practice `kubectl` on a simulated cluster, in your terminal or in the browser, with guided labs that check your work automatically, a CKAD lab track for every exam domain, and a timed mock exam in the style of the real one.
 
 Nothing here runs real containers. The simulator models how Kubernetes objects behave: the scheduler places Pods on nodes, the kubelet pulls images and starts containers, Deployments roll out new ReplicaSets, Services collect endpoints. You see the same states, events and error messages a real cluster gives you, without installing anything or paying for a cluster.
 
@@ -40,6 +40,8 @@ Other ways to start it:
 ```bash
 npm start                      # open the shell (after npm run build)
 npm start -- lab 3             # jump straight to lab 3
+npm start -- lab ckad-12       # a CKAD lab
+npm start -- exam              # the timed CKAD mock exam
 npm start -- -c "kubectl get nodes -o wide"   # run one command and exit
 ```
 
@@ -59,36 +61,85 @@ In the browser, open the page, click Sandbox and put it on the projector. Learne
 
 ## Labs
 
-| # | Lab | Topic | Level |
-|---|-----|-------|-------|
-| 01 | Run your first Pod | Pods | beginner |
-| 02 | Write a Pod manifest | Pods | beginner |
-| 03 | Work in a namespace | Namespaces | beginner |
-| 04 | Create a Deployment | Deployments | beginner |
-| 05 | Scale a Deployment | Deployments | beginner |
-| 06 | Roll out a new version | Deployments | beginner |
-| 07 | Roll back a broken release | Troubleshooting | beginner |
-| 08 | Expose a Deployment with a Service | Services | beginner |
-| 09 | Fix a Pod that cannot pull its image | Troubleshooting | beginner |
-| 10 | Configure a Pod with a ConfigMap | Configuration | beginner |
+**Beginner** (first contact with Kubernetes):
+
+| # | Lab | Topic |
+|---|-----|-------|
+| 01 | Run your first Pod | Pods |
+| 02 | Write a Pod manifest | Pods |
+| 03 | Work in a namespace | Namespaces |
+| 04 | Create a Deployment | Deployments |
+| 05 | Scale a Deployment | Deployments |
+| 06 | Roll out a new version | Deployments |
+| 07 | Roll back a broken release | Troubleshooting |
+| 08 | Expose a Deployment with a Service | Services |
+| 09 | Fix a Pod that cannot pull its image | Troubleshooting |
+| 10 | Configure a Pod with a ConfigMap | Configuration |
+
+**CKAD track**, grouped by the five domains of the CKAD curriculum:
+
+| Domain (weight) | Labs |
+|---|---|
+| Application Design and Build (20%) | ckad-01 build, push and run an image · 02 CronJob · 03 parallel Job · 04 init container · 05 native sidecar · 06 PersistentVolumeClaim |
+| Application Deployment (20%) | ckad-07 rolling update strategy · 08 canary · 09 blue/green · 10 Helm install and upgrade · 11 Kustomize overlay |
+| Application Observability and Maintenance (15%) | ckad-12 readiness and liveness probes · 13 probe restart loop · 14 removed API versions · 15 debug a crash with logs · 16 `kubectl top` |
+| Application Environment, Configuration and Security (25%) | ckad-17 ConfigMaps and Secrets · 18 securityContext · 19 ServiceAccount and RBAC · 20 ResourceQuota · 21 custom resources |
+| Services and Networking (20%) | ckad-22 NetworkPolicy · 23 fix a Service and add a NodePort · 24 Ingress |
 
 Each lab is a YAML file in [`labs/`](labs). Writing a new one takes a few minutes, see [docs/writing-labs.md](docs/writing-labs.md).
 
+## Mock exam
+
+`ckad-mock-1` has 16 weighted tasks across all five domains, a 120 minute timer and a 66% pass mark, like the real exam. You start on a base node and connect to each task's host with `ssh`, where a separate simulated cluster waits for you. At the end every task is scored automatically, with partial credit per check, and you get the breakdown and a reference solution for each task.
+
+In the browser click **Mock exam**; in the terminal run `npm start -- exam`. The questions are original practice material mapped to the public curriculum, not exam questions.
+
+## CKAD coverage
+
+How the [CKAD curriculum](https://github.com/cncf/curriculum) competencies map to the simulator:
+
+| Competency | In PodSim |
+|---|---|
+| Define, build and modify container images | `docker` and `podman` build from a Dockerfile, `images`, `tag`, `save`, `load`, `push`; Pods pull pushed images with their CMD, ENTRYPOINT, ENV and WORKDIR |
+| Choose and use the right workload resource | Deployments, ReplicaSets, DaemonSets, StatefulSets, Jobs (completions, parallelism, backoff, Indexed, TTL), CronJobs (schedules, concurrency, history) |
+| Multi-container Pod design patterns | init containers, native sidecars, shared volumes, shared network and `localhost` |
+| Persistent and ephemeral volumes | emptyDir, hostPath, ConfigMap, Secret, projected and downwardAPI volumes; PVCs bound by the `standard` StorageClass; StatefulSet volumeClaimTemplates |
+| Deployment strategies (blue/green, canary) | Services route by label to every ready Pod, so selector switches and replica splits behave like on a real cluster |
+| Rolling updates | maxSurge, maxUnavailable, Recreate, revisions, `rollout history/undo/pause/resume/restart` |
+| Helm | `helm repo`, `search`, `show`, `pull`, `create`, `lint`, `template`, `install`, `upgrade`, `rollback`, `history`, `get`, `uninstall`, with Bitnami nginx, apache and redis charts |
+| Kustomize | `kubectl kustomize`, `apply -k`, `delete -k`: bases, overlays, generators with hash suffixes, prefixes, labels, images, replicas, patches |
+| API deprecations | removed versions fail with the real "no matches for kind" error; `kubectl api-resources`, `kubectl explain` |
+| Probes and health checks | liveness, readiness and startup probes (httpGet, tcpSocket, exec, grpc) with real events and restarts |
+| Built-in CLI monitoring | `kubectl top pod/node` from a simulated metrics-server, `kubectl events`, `describe`, HorizontalPodAutoscalers |
+| Container logs | `logs`, `-c`, `--previous`, `-f`, `--tail`, `--since`, `-l`, logs of Jobs and Deployments |
+| Debugging | `describe`, events, `exec -it`, `kubectl debug` (ephemeral containers, `--copy-to`, `node/NAME`), port-forward |
+| Resources that extend Kubernetes | CustomResourceDefinitions with schema validation, printer columns and short names |
+| Authentication, authorization, admission | RBAC (Roles, ClusterRoles, bindings, `--as`, `auth can-i`, `auth can-i --list`), ServiceAccount tokens, Pod Security Admission, quota and LimitRange admission |
+| Requests, limits, quotas | scheduling by requests, OOMKilled on memory limits, ResourceQuota, LimitRange defaults |
+| ConfigMaps and Secrets | environment variables, `envFrom`, files, `subPath`, immutable objects, generic, TLS and docker-registry Secrets |
+| ServiceAccounts | per-namespace accounts, `automountServiceAccountToken`, calling the API server from a Pod with the token |
+| Application security | securityContext (users, groups, fsGroup, capabilities, read-only root, privilege escalation) enforced inside the container |
+| NetworkPolicies | ingress and egress rules, pod, namespace and IP block peers, ports, DNS; enforced for `wget`, `curl` and `nc` |
+| Services | ClusterIP, NodePort, headless, ExternalName, named target ports, endpoints, DNS names |
+| Ingress | ingress-nginx controller on NodePort 30080/30443, host and path rules, path types, default backends, IngressClass |
+
+The simulated cluster reports Kubernetes v1.35, the version the CKAD exam environment used in 2026. The exam moves to newer releases a few weeks after each one, so check the official exam FAQ before you book.
+
 ## What is simulated
 
-**Cluster**: one control plane node and two workers, kube-system Pods (etcd, API server, scheduler, controller manager, CoreDNS, kube-proxy), default ServiceAccounts and the default ClusterRoles.
+**Cluster**: one control plane node and two workers, kube-system Pods (etcd, API server, scheduler, controller manager, CoreDNS, kube-proxy, metrics-server), the ingress-nginx controller, a default `standard` StorageClass, default ServiceAccounts and ClusterRoles.
 
-**Controllers**: scheduler (taints and tolerations, nodeSelector, node affinity, CPU and memory requests, cordoned nodes), kubelet (image pulls, ErrImagePull and ImagePullBackOff, CrashLoopBackOff with back-off timing, CreateContainerConfigError, missing volumes), Deployment (RollingUpdate with maxSurge and maxUnavailable, Recreate, revisions, rollback, progress deadline), ReplicaSet, Endpoints, garbage collection, PersistentVolumeClaims with a `standard` storage class.
+**Controllers**: scheduler (taints and tolerations, nodeSelector, node affinity, requests, cordoned nodes), kubelet (image pulls, init containers, sidecars, probes, restarts with back-off, OOMKilled, ephemeral containers), Deployment, ReplicaSet, DaemonSet, StatefulSet, Job, CronJob, HorizontalPodAutoscaler, Endpoints, PersistentVolume binding and provisioning, ResourceQuota, Ingress status, garbage collection.
 
-**kubectl**: `get` (wide, yaml, json, name, jsonpath, custom-columns, `--show-labels`, `-l`, `--field-selector`, `--sort-by`, `-A`), `describe`, `run`, `create` (deployment, namespace, configmap, secret, service, serviceaccount, role, rolebinding, clusterrole, clusterrolebinding), `apply`, `delete`, `replace --force`, `patch`, `label`, `annotate`, `scale`, `expose`, `set image|env|resources|serviceaccount`, `rollout status|history|undo|restart|pause|resume`, `logs`, `exec`, `cordon`, `uncordon`, `drain`, `taint`, `auth can-i`, `wait`, `config set-context --current --namespace`, `api-resources`, `version`, `cluster-info`.
+**Containers run a shell**: every container runs its command in a small shell interpreter on the simulated clock, with a filesystem built from its image and volumes. `kubectl exec` and `kubectl run --rm -it` give you a prompt inside the container with `ls`, `cat`, `env`, `ps`, `wget`, `curl`, `nc`, `nslookup` and friends. HTTP and TCP traffic goes through Services, DNS and NetworkPolicies to processes that really listen.
 
-**Inside containers**: `kubectl exec` and `kubectl run --rm -it ... -- CMD` support `env`, `printenv`, `cat` (including mounted ConfigMaps and Secrets), `ls`, `nslookup`, `wget` and `curl`. HTTP requests go through Services to the right Pods, so a wrong selector or targetPort fails the way it would on a real cluster.
+**kubectl**: `get` (all output formats, `-l`, `--field-selector`, `--sort-by`, `-A`), `describe`, `explain`, `run`, `create` (all common generators), `apply`/`create`/`delete` with `-f` and `-k`, `kustomize`, `replace --force`, `patch` (strategic, merge, JSON, `--patch-file`), `label`, `annotate`, `scale`, `autoscale`, `expose`, `set`, `rollout`, `logs`, `exec`, `debug`, `port-forward`, `top`, `events`, `cordon`, `drain`, `taint`, `auth can-i`, `wait`, `config`, `api-resources`.
 
-**API server behaviour**: strict field validation (a typo like `imagee` is rejected), type checks (`version: 1.0` in labels is rejected), immutable fields (Pod spec, Deployment selector), name validation, the real error messages.
+**On the host**: `helm`, `docker`, `podman`, `curl` and `wget` against NodePorts, and a shell with pipes, redirects, heredocs, variables, aliases, `grep`, `sed`, `awk`, `cut`, `sort`, `find`, `base64` and more.
 
-**Shell**: pipes into `grep`, `awk`, `cut`, `wc`, `head`, `tail`, `sort`, `base64 -d`, `xargs`; `>` and `>>` redirects; heredocs (`cat <<EOF > pod.yaml`); `export do="--dry-run=client -o yaml"` style variables; `alias`.
+**API server behaviour**: strict field validation, type checks, immutable fields, admission (quota, LimitRange, Pod Security), RBAC, removed API versions, and the real error messages.
 
-Not simulated yet: Jobs, CronJobs, DaemonSets, StatefulSets, NetworkPolicy enforcement, probes, HPA, `kubectl edit`, `--watch`, `explain`. See the [roadmap](docs/roadmap.md).
+Not simulated yet: `--watch`, an editor inside the terminal for `kubectl edit` (use the Files panel or your own editor), Gateway API, several clusters in one kubeconfig. See the [roadmap](docs/roadmap.md).
 
 ## How it works
 
@@ -97,6 +148,7 @@ packages/core   simulated cluster engine, kubectl emulation, shell, lab runner (
 packages/cli    terminal front end (readline, real files in ./podsim-work)
 packages/web    browser front end (xterm.js, in-memory files)
 labs/           lab definitions in YAML
+exams/          mock exam definitions in YAML
 ```
 
 The engine keeps every object in an in-memory store shaped like the real API, so `kubectl get -o yaml` looks real. Controllers run on a virtual clock that advances with wall time between commands, in one-second steps, so state changes happen in the right order. Labs and tests can jump the clock forward to skip waiting.

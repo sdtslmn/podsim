@@ -5,7 +5,7 @@ import "@xterm/xterm/css/xterm.css";
 import "./style.css";
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
-import { Cluster, Shell, LabSession, MemoryFS, parseLab, K8S_VERSION, type IO, type Lab, type CheckResult } from "@podsim/core";
+import { Cluster, Shell, LabSession, MemoryFS, parseLab, parseExam, ExamSession, K8S_VERSION, type IO, type Lab, type CheckResult, type Exam, type ExamResult } from "@podsim/core";
 import { LineEditor } from "./line-editor";
 
 const REPO_URL: string = import.meta.env.VITE_REPO_URL ?? "https://github.com/sdtslmn/podsim";
@@ -25,6 +25,18 @@ const labs: Lab[] = Object.entries(rawLabs)
   })
   .filter((l): l is Lab => !!l)
   .sort((a, b) => LEVELS[a.level] - LEVELS[b.level] || a.id.localeCompare(b.id));
+
+const rawExams = import.meta.glob("../../../exams/*.yaml", { query: "?raw", import: "default", eager: true }) as Record<string, string>;
+const exams: Exam[] = Object.entries(rawExams)
+  .map(([file, text]) => {
+    try {
+      return parseExam(text, file);
+    } catch (e) {
+      console.warn(`Skipping ${file}: ${(e as Error).message}`);
+      return undefined;
+    }
+  })
+  .filter((e): e is Exam => !!e);
 
 const PROGRESS_KEY = "podsim.progress";
 function loadProgress(): Set<string> {
@@ -69,7 +81,7 @@ const termMd = (s: string) => s.replace(/`([^`]+)`/g, (_, c) => C.cyan(c));
 
 // ---------------------------------------------------------------- state
 
-type View = "labs" | "lab" | "sandbox" | "files";
+type View = "labs" | "lab" | "sandbox" | "files" | "exam-intro" | "exam" | "exam-result";
 
 const panel = document.getElementById("panel")!;
 const done = loadProgress();
@@ -84,6 +96,11 @@ let notice: { text: string; success?: boolean } | undefined;
 let editingFile: string | undefined;
 let aborted = false;
 let pending = "";
+let exam: ExamSession | undefined;
+let examPick: Exam | undefined = exams[0];
+let examTask = 1;
+let examResult: { exam: Exam; result: ExamResult } | undefined;
+let examTimer: ReturnType<typeof setInterval> | undefined;
 
 (document.getElementById("nav-repo") as HTMLAnchorElement).href = REPO_URL;
 
@@ -112,7 +129,16 @@ const io: IO = {
   aborted: () => aborted,
 };
 
-const prompt = () => shell.sessionPrompt() ?? `${lab ? C.yellow(`[${lab.id.split("-")[0]}] `) : ""}${C.green("controlplane")}:${C.cyan("~")}$ `;
+const prompt = () => {
+  if (exam) {
+    const p = exam.prompt();
+    return p.startsWith("candidate@") ? `${C.green(p.slice(0, p.indexOf(":")))}:${C.cyan("~")}$ ` : p;
+  }
+  return shell.sessionPrompt() ?? `${lab ? C.yellow(`[${lab.id.startsWith("ckad-") ? lab.id.split("-").slice(0, 2).join("-") : lab.id.split("-")[0]}] `) : ""}${C.green("controlplane")}:${C.cyan("~")}$ `;
+};
+const activeCluster = () => (exam ? exam.cluster : cluster);
+const activeShell = () => (exam ? exam.shell : shell);
+const activeFs = () => (exam ? (exam.shell?.fs as MemoryFS | undefined) : fs);
 
 const KUBECTL_VERBS = ["get", "describe", "create", "apply", "delete", "run", "expose", "scale", "set", "rollout", "logs", "exec", "label", "annotate", "patch", "replace", "cordon", "uncordon", "drain", "taint", "config", "auth", "wait", "api-resources", "cluster-info", "version"];
 const RESOURCES = ["pods", "deployments", "replicasets", "services", "endpoints", "configmaps", "secrets", "namespaces", "nodes", "events", "serviceaccounts", "all"];
@@ -128,17 +154,18 @@ const editor = new LineEditor(term, {
     const words = line.split(/\s+/);
     const last = words[words.length - 1];
     let candidates: string[] = [];
-    if (words.length === 1) candidates = ["kubectl", "check", "hint", "task", "solution", "reset", "next", "labs", "lab", "help", "clear", "cat", "ls"];
+    if (words.length === 1) candidates = exam ? ["kubectl", "ssh", "exit", "helm", "cat", "ls", "clear"] : ["kubectl", "check", "hint", "task", "solution", "reset", "next", "labs", "lab", "help", "clear", "cat", "ls"];
+    else if (exam && words[0] === "ssh") candidates = exam.exam.tasks.map((t) => t.host);
     else if (words[0] === "kubectl" || words[0] === "k") {
       if (words.length === 2) candidates = KUBECTL_VERBS;
       else if (words.length === 3 && ["get", "describe", "delete", "label"].includes(words[1])) candidates = RESOURCES;
-      else if (words.length === 3 && ["logs", "exec"].includes(words[1])) candidates = cluster.list("Pod", shell.kubectl.state.namespace).map((p) => p.metadata.name);
+      else if (words.length === 3 && ["logs", "exec"].includes(words[1])) candidates = activeCluster()?.list("Pod", activeShell()?.kubectl.state.namespace).map((p) => p.metadata.name) ?? [];
     }
     return candidates.filter((c) => c.startsWith(last));
   },
   onLine: async (line) => {
     pending = pending ? pending + "\n" + line : line;
-    if (shell.needsMoreInput(pending)) {
+    if (exam ? exam.needsMoreInput(pending) : shell.needsMoreInput(pending)) {
       editor.showPrompt(true);
       return;
     }
@@ -147,7 +174,18 @@ const editor = new LineEditor(term, {
     if (input.trim()) {
       aborted = false;
       try {
-        await shell.exec(input, io);
+        if (exam) {
+          if (exam.remainingMs() === 0) await finishExam();
+          else {
+            const before = exam.host;
+            await exam.exec(input, io);
+            if (exam.host !== before) {
+              const t = exam.taskOnHost();
+              if (t) examTask = t.n;
+              if (view === "exam") renderPanel();
+            }
+          }
+        } else await shell.exec(input, io);
       } catch (e) {
         print(C.red(`internal error: ${(e as Error).message}`));
       }
@@ -250,12 +288,158 @@ function showSolution(fromButton: boolean): void {
 }
 
 function openEditor(file: string): boolean {
-  if (!fs.exists(file)) fs.writeFile(file, "");
+  const f = activeFs() ?? fs;
+  if (!f.exists(file)) f.writeFile(file, "");
   editingFile = file;
   view = "files";
   renderPanel();
   print(C.dim(`Opened ${file} in the Files panel. Save it there, then continue here.`));
   return true;
+}
+
+// ---------------------------------------------------------------- exam
+
+const fmtClock = (ms: number) => {
+  const sec = Math.floor(ms / 1000);
+  return `${Math.floor(sec / 3600)}:${String(Math.floor((sec % 3600) / 60)).padStart(2, "0")}:${String(sec % 60).padStart(2, "0")}`;
+};
+
+function startExam(e: Exam): void {
+  lab = undefined;
+  session = undefined;
+  examResult = undefined;
+  exam = new ExamSession(e, { shell: { openEditor } });
+  examTask = 1;
+  view = "exam";
+  renderPanel();
+  if (examTimer) clearInterval(examTimer);
+  examTimer = setInterval(() => {
+    if (!exam) return;
+    const left = exam.remainingMs();
+    const el = document.getElementById("exam-timer");
+    if (el) {
+      el.textContent = fmtClock(left);
+      el.classList.toggle("low", left < 10 * 60000);
+    }
+    if (left === 0) void finishExam();
+  }, 1000);
+  term.write("\r\x1b[K");
+  print("");
+  print(C.bold(`${e.title} started.`) + C.dim(` ${e.tasks.length} tasks, ${e.minutes} minutes.`));
+  print(C.dim("You are on the base node. Each task names its host: connect with ssh HOST, return with exit."));
+  print(`Task 1 is on ${C.cyan(e.tasks[0].host)}: ${C.cyan(`ssh ${e.tasks[0].host}`)}`);
+  editor.showPrompt();
+}
+
+async function finishExam(): Promise<void> {
+  if (!exam) return;
+  const ex = exam;
+  if (examTimer) clearInterval(examTimer);
+  examTimer = undefined;
+  term.write("\r\x1b[K" + C.dim("Scoring your exam...") + "\n");
+  const result = await ex.grade();
+  examResult = { exam: ex.exam, result };
+  exam = undefined;
+  print(`${C.bold(`Score: ${result.percent}%`)} ${result.passed ? C.green("PASS") : C.red("NOT PASSED")} ${C.dim(`(pass at ${ex.exam.passPercent}%, time used ${fmtClock(result.usedMs)})`)}`);
+  print(C.dim("The breakdown and solutions are in the panel. The terminal is back on a free sandbox."));
+  startSandbox(false);
+  view = "exam-result";
+  renderPanel();
+  editor.showPrompt();
+}
+
+function renderExamIntro(): void {
+  if (!exams.length) {
+    panel.innerHTML = `<h2>Mock exam</h2><p class="meta">No mock exams are bundled with this build.</p>`;
+    return;
+  }
+  const e = examPick ?? exams[0];
+  const byDomain = new Map<string, number>();
+  for (const t of e.tasks) byDomain.set(t.domain, (byDomain.get(t.domain) ?? 0) + t.weight);
+  panel.innerHTML = `<h2>${esc(e.title)}</h2>
+  <p class="meta">${e.tasks.length} tasks · ${e.minutes} minutes · pass at ${e.passPercent}%</p>
+  <div class="intro">${md(e.intro)}</div>
+  <h3>Domains</h3>
+  <ul>${[...byDomain].map(([d, w]) => `<li>${esc(d)}: ${w}%</li>`).join("")}</ul>
+  <h3>How it works</h3>
+  <ul>
+    <li>The timer runs in real time and the exam is scored automatically when it ends.</li>
+    <li>You start on the base node. Connect to each task's host with <code>ssh HOST</code> and return with <code>exit</code>.</li>
+    <li><code>kubectl</code> (alias <code>k</code>), <code>helm</code>, <code>docker</code>, <code>podman</code> and the usual shell tools are available on every host. No hints, no checks until the end.</li>
+    <li>The Kubernetes docs at kubernetes.io are allowed during the real exam, so feel free to keep them open here too.</li>
+  </ul>
+  ${exams.length > 1 ? `<p><select id="exam-pick">${exams.map((x) => `<option value="${esc(x.id)}"${x === e ? " selected" : ""}>${esc(x.title)}</option>`).join("")}</select></p>` : ""}
+  <div class="actions"><button class="btn primary" id="exam-start">Start the exam</button></div>`;
+  panel.querySelector("#exam-pick")?.addEventListener("change", (ev) => {
+    examPick = exams.find((x) => x.id === (ev.target as HTMLSelectElement).value);
+    renderExamIntro();
+  });
+  panel.querySelector("#exam-start")?.addEventListener("click", () => startExam(e));
+}
+
+function renderExam(): void {
+  const ex = exam!;
+  const t = ex.task(examTask) ?? ex.exam.tasks[0];
+  const left = ex.remainingMs();
+  panel.innerHTML = `<div class="exam-head"><strong>${esc(ex.exam.title)}</strong><span id="exam-timer" class="timer${left < 600000 ? " low" : ""}">${fmtClock(left)}</span></div>
+  <div class="task-grid">${ex.exam.tasks.map((x) => `<button data-task="${x.n}" class="${x.n === t.n ? "current " : ""}${ex.visited(x.n) ? "visited " : ""}${ex.flagged.has(x.n) ? "flagged" : ""}" title="${esc(x.title)} (${x.weight}%)">${x.n}</button>`).join("")}</div>
+  <p class="meta">Task ${t.n} of ${ex.exam.tasks.length} · weight ${t.weight}% · ${esc(t.domain)}${ex.flagged.has(t.n) ? " · flagged" : ""}</p>
+  <h2>${esc(t.title)}</h2>
+  <div class="host">You must connect to the correct host. Failure to do so may result in a zero score.<br><code>ssh ${esc(t.host)}</code> <button class="link" id="exam-copy">copy</button>${ex.host === t.host ? " · you are on this host" : ""}</div>
+  <div class="intro">${md(t.text)}</div>
+  <div class="actions">
+    <button class="btn" id="exam-prev"${t.n === 1 ? " disabled" : ""}>Previous</button>
+    <button class="btn" id="exam-next"${t.n === ex.exam.tasks.length ? " disabled" : ""}>Next</button>
+    <button class="btn" id="exam-flag">${ex.flagged.has(t.n) ? "Unflag" : "Flag for review"}</button>
+    <button class="btn primary" id="exam-end">End exam and score</button>
+  </div>`;
+  panel.querySelectorAll<HTMLButtonElement>("[data-task]").forEach((b) =>
+    b.addEventListener("click", () => {
+      examTask = parseInt(b.dataset.task!, 10);
+      renderExam();
+    }),
+  );
+  const on = (id: string, fn: () => void) => panel.querySelector(`#${id}`)?.addEventListener("click", fn);
+  on("exam-prev", () => ((examTask = Math.max(1, t.n - 1)), renderExam()));
+  on("exam-next", () => ((examTask = Math.min(ex.exam.tasks.length, t.n + 1)), renderExam()));
+  on("exam-flag", () => {
+    if (ex.flagged.has(t.n)) ex.flagged.delete(t.n);
+    else ex.flagged.add(t.n);
+    renderExam();
+  });
+  on("exam-copy", () => void navigator.clipboard?.writeText(`ssh ${t.host}`).catch(() => undefined));
+  on("exam-end", () => {
+    const btn = panel.querySelector<HTMLButtonElement>("#exam-end")!;
+    if (btn.dataset.confirm !== "1") {
+      btn.dataset.confirm = "1";
+      btn.textContent = "Click again to end the exam";
+      return;
+    }
+    void finishExam();
+  });
+}
+
+function renderExamResult(): void {
+  const { exam: e, result: r } = examResult!;
+  panel.innerHTML = `<h2>${esc(e.title)}: results</h2>
+  <p><span class="big-score ${r.passed ? "pass" : "fail"}">${r.percent}%</span> <strong>${r.passed ? "Pass" : "Not passed"}</strong> <span class="meta">pass at ${e.passPercent}% · time used ${fmtClock(r.usedMs)}</span></p>
+  <table class="score-table">${r.tasks
+    .map(
+      (t) => `<tr><td>${t.task.n}.</td><td><strong>${esc(t.task.title)}</strong> <span class="meta">${esc(t.task.domain)}</span>
+      ${t.checks.filter((c) => !c.passed).map((c) => `<div class="fail">✘ ${esc(c.name)}${c.detail ? ` (${esc(c.detail)})` : ""}</div>`).join("")}
+      <details><summary class="meta">Solution</summary><pre>${esc(t.task.solution.join("\n"))}</pre></details></td>
+      <td class="num">${t.score.toFixed(1)} / ${t.task.weight}</td></tr>`,
+    )
+    .join("")}</table>
+  <div class="actions"><button class="btn primary" id="exam-again">Try again</button><button class="btn" id="exam-labs">Back to the labs</button></div>`;
+  panel.querySelector("#exam-again")?.addEventListener("click", () => {
+    view = "exam-intro";
+    renderPanel();
+  });
+  panel.querySelector("#exam-labs")?.addEventListener("click", () => {
+    view = "labs";
+    renderPanel();
+  });
 }
 
 function registerCommands(): void {
@@ -343,14 +527,17 @@ Edit files in the Files panel, or with: vi file.yaml`);
 // ---------------------------------------------------------------- panel
 
 function setNav(): void {
-  for (const id of ["labs", "sandbox", "files"]) {
-    document.getElementById(`nav-${id}`)!.classList.toggle("active", view === id || (id === "labs" && view === "lab"));
+  for (const id of ["labs", "sandbox", "files", "exam"]) {
+    document.getElementById(`nav-${id}`)!.classList.toggle("active", view === id || (id === "labs" && view === "lab") || (id === "exam" && view.startsWith("exam")));
   }
 }
 
 function renderPanel(): void {
   setNav();
   if (view === "files") return renderFiles();
+  if (view === "exam" && exam) return renderExam();
+  if (view === "exam-result" && examResult) return renderExamResult();
+  if (view === "exam-intro" || view === "exam") return renderExamIntro();
   if (view === "lab" && lab) return renderLab();
   if (view === "sandbox") return renderSandbox();
   return renderLabList();
@@ -361,14 +548,16 @@ function renderLabList(): void {
   <p class="meta">Short, guided exercises on a simulated cluster. Each lab checks your work automatically. Your progress is saved in this browser.</p>`;
   let level = "";
   for (const l of labs) {
-    if (l.level !== level) {
+    const group = l.id.startsWith("ckad-") ? `CKAD · ${l.topic}` : l.level;
+    if (group !== level) {
       if (level) html += "</ul>";
-      level = l.level;
+      level = group;
       html += `<h3>${esc(level)}</h3><ul class="lab-list">`;
     }
     html += `<li data-lab="${esc(l.id)}"><span class="${done.has(l.id) ? "done" : ""}">${esc(l.title)}</span><span class="meta">${l.minutes} min</span></li>`;
   }
   html += "</ul>";
+  if (exams.length) html += `<h3>Mock exam</h3><p>Ready for a full run? ${exams.map((e) => `<button class="btn" data-exam="${esc(e.id)}">${esc(e.title)}</button>`).join(" ")} <span class="meta">${exams[0].tasks.length} tasks, ${exams[0].minutes} minutes, scored automatically.</span></p>`;
   html += `<h3>Free practice</h3><p>Prefer to explore? <button class="btn" id="go-sandbox">Open the sandbox</button></p>`;
   panel.innerHTML = html;
   panel.querySelectorAll<HTMLLIElement>("li[data-lab]").forEach((li) =>
@@ -378,6 +567,13 @@ function renderLabList(): void {
         term.write("\r\x1b[K");
         void startLab(l);
       }
+    }),
+  );
+  panel.querySelectorAll<HTMLButtonElement>("button[data-exam]").forEach((b) =>
+    b.addEventListener("click", () => {
+      examPick = exams.find((e) => e.id === b.dataset.exam);
+      view = exam ? "exam" : "exam-intro";
+      renderPanel();
     }),
   );
   panel.querySelector("#go-sandbox")?.addEventListener("click", () => {
@@ -443,6 +639,7 @@ function renderSandbox(): void {
 }
 
 function renderFiles(): void {
+  const fs = activeFs() ?? new MemoryFS();
   const files = fs.list("").filter((f) => f !== ".keep");
   let html = `<h2>Files</h2><p class="meta">Files in the simulator's work folder. Use them with <code>kubectl apply -f NAME</code>.</p>`;
   html += files.length ? `<ul class="files-list">${files.map((f) => `<li data-file="${esc(f)}">${esc(f)}</li>`).join("")}</ul>` : `<p class="meta">No files yet. Create one below, or in the terminal with <code>kubectl run web --image=nginx --dry-run=client -o yaml &gt; pod.yaml</code>.</p>`;
@@ -450,7 +647,7 @@ function renderFiles(): void {
   html += `<h3>${editingFile ? "Edit" : "New file"}</h3>
     <input class="filename" id="file-name" placeholder="pod.yaml" value="${esc(editingFile ?? "")}" />
     <textarea class="editor" id="file-body" spellcheck="false">${esc(content)}</textarea>
-    <div class="actions"><button class="btn primary" id="file-save">Save</button>${editingFile ? `<button class="btn" id="file-new">New file</button>` : ""}${lab ? `<button class="btn" id="file-back">Back to the lab</button>` : ""}</div>`;
+    <div class="actions"><button class="btn primary" id="file-save">Save</button>${editingFile ? `<button class="btn" id="file-new">New file</button>` : ""}${lab || exam ? `<button class="btn" id="file-back">Back to the ${exam ? "exam" : "lab"}</button>` : ""}</div>`;
   panel.innerHTML = html;
   panel.querySelectorAll<HTMLLIElement>("li[data-file]").forEach((li) =>
     li.addEventListener("click", () => {
@@ -481,19 +678,35 @@ function renderFiles(): void {
     renderFiles();
   });
   panel.querySelector("#file-back")?.addEventListener("click", () => {
-    view = "lab";
+    view = exam ? "exam" : "lab";
     renderPanel();
   });
 }
 
 document.getElementById("nav-labs")!.addEventListener("click", () => {
+  if (exam) {
+    view = "exam";
+    renderPanel();
+    return;
+  }
   view = lab ? "lab" : "labs";
   if (view === "lab" && document.getElementById("nav-labs")!.classList.contains("active")) view = "labs";
   renderPanel();
 });
 document.getElementById("nav-sandbox")!.addEventListener("click", () => {
+  if (exam) {
+    view = "exam";
+    renderPanel();
+    print(C.yellow("The exam is still running. End it in the panel (End exam and score) before opening the sandbox."));
+    editor.showPrompt();
+    return;
+  }
   term.write("\r\x1b[K");
   startSandbox();
+});
+document.getElementById("nav-exam")!.addEventListener("click", () => {
+  view = exam ? "exam" : examResult && view !== "exam-result" ? "exam-result" : "exam-intro";
+  renderPanel();
 });
 document.getElementById("nav-files")!.addEventListener("click", () => {
   view = "files";

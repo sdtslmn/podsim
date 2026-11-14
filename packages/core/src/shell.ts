@@ -6,6 +6,7 @@
 import type { FileSystem } from "./fs.js";
 import type { Cluster } from "./cluster.js";
 import { execInContainer, identityFor, hostNet } from "./podruntime.js";
+import { execNow, hasBuiltin, normalizePath, type Fs, type Host } from "./runtime.js";
 import { parseImage } from "./images.js";
 import { helm } from "./helm/index.js";
 import { containerTool } from "./containertool.js";
@@ -73,7 +74,7 @@ export class Shell {
     const s = this.kubectl.state.session;
     if (!s) return undefined;
     const pod = this.cluster.get("Pod", s.pod, s.namespace);
-    const c = [...(pod?.spec?.containers ?? []), ...(pod?.spec?.initContainers ?? [])].find((x: { name: string }) => x.name === s.container);
+    const c = [...(pod?.spec?.containers ?? []), ...(pod?.spec?.initContainers ?? []), ...(pod?.spec?.ephemeralContainers ?? [])].find((x: { name: string }) => x.name === s.container);
     const cwd = s.vars.PWD ?? "/";
     const user = pod && c ? identityFor(pod, c).uid : 0;
     const image = c ? parseImage(c.image).repository : "busybox";
@@ -97,7 +98,10 @@ export class Shell {
     const exitMatch = line.match(/^(exit|logout)(\s+(\d+))?$/);
     if (exitMatch) {
       const code = parseInt(exitMatch[3] ?? "0", 10);
-      if (!s.remove && this.cluster.get("Pod", s.pod, s.namespace)?.spec?.containers?.[0]?.stdin) io.stdout(`Session ended, resume using 'kubectl attach ${s.pod} -c ${s.container} -i -t' command when the pod is running\n`);
+      const p = this.cluster.get("Pod", s.pod, s.namespace);
+      const eph = (p?.spec?.ephemeralContainers ?? []).some((c: { name: string }) => c.name === s.container);
+      if (eph) io.stdout(`Session ended, the ephemeral container will not be restarted but may be reattached using 'kubectl attach ${s.pod} -c ${s.container} -i -t' if it is still running\n`);
+      else if (!s.remove && (p?.spec?.containers ?? []).find((c: { name: string; stdin?: boolean }) => c.name === s.container)?.stdin) io.stdout(`Session ended, resume using 'kubectl attach ${s.pod} -c ${s.container} -i -t' command when the pod is running\n`);
       if (code !== 0 && !s.remove) io.stderr(`command terminated with exit code ${code}\n`);
       return end(code);
     }
@@ -106,7 +110,7 @@ export class Shell {
     const pod = this.cluster.get("Pod", s.pod, s.namespace);
     const sim = pod ? this.cluster.podSims.get(pod.metadata.uid!) : undefined;
     const cs = sim?.containers[s.container];
-    const c = [...(pod?.spec?.containers ?? []), ...(pod?.spec?.initContainers ?? [])].find((x: { name: string }) => x.name === s.container);
+    const c = [...(pod?.spec?.containers ?? []), ...(pod?.spec?.initContainers ?? []), ...(pod?.spec?.ephemeralContainers ?? [])].find((x: { name: string }) => x.name === s.container);
     if (!pod || !cs || !c || cs.phase !== "running") {
       io.stderr("command terminated with exit code 137\n");
       return end(137);
@@ -141,12 +145,44 @@ export class Shell {
         }
         i++;
         heredoc = body.join("\n") + "\n";
-        if (!h.quoted) heredoc = this.expandVars(heredoc);
+        if (!h.quoted) heredoc = this.expandHeredoc(heredoc);
         line = line.replace(/<<-?\s*['"]?\w+['"]?/, "");
       }
       code = await this.runLine(line, io, heredoc);
     }
     return code;
+  }
+
+  /** Expand an unquoted heredoc body like bash: $VAR and ${VAR}, with \\$, \\` and \\\\ escapes. */
+  private expandHeredoc(text: string): string {
+    let out = "";
+    for (let i = 0; i < text.length; i++) {
+      const ch = text[i];
+      if (ch === "\\" && i + 1 < text.length) {
+        const next = text[i + 1];
+        if (next === "$" || next === "`" || next === "\\") {
+          out += next;
+          i++;
+          continue;
+        }
+        if (next === "\n") {
+          i++;
+          continue;
+        }
+        out += ch;
+        continue;
+      }
+      if (ch === "$") {
+        const m = text.slice(i).match(/^\$\{(\w+)\}|^\$(\w+)/);
+        if (m) {
+          out += this.vars.get(m[1] ?? m[2]) ?? "";
+          i += m[0].length - 1;
+          continue;
+        }
+      }
+      out += ch;
+    }
+    return out;
   }
 
   private expandVars(text: string): string {
@@ -391,6 +427,14 @@ export class Shell {
     return code;
   }
 
+  /** Text tools (sed, cut, printf, seq, find...) run on the work folder through the container runtime. */
+  private runtimeTool(cmd: string, args: string[], io: IO): number {
+    const r = execNow(hostMachine(this.cluster, this.fs, this.vars), [cmd, ...args], { stdin: io.stdin, vars: { PWD: "/" } });
+    if (r.stdout) io.stdout(r.stdout);
+    if (r.stderr) io.stderr(r.stderr);
+    return r.code;
+  }
+
   private async runCommand(words: string[], io: IO): Promise<number> {
     // Variable assignment: FOO=bar
     if (words.length === 1 && /^\w+=/.test(words[0])) {
@@ -406,6 +450,7 @@ export class Shell {
       args = [...parts.slice(1), ...args];
     }
     if (this.commands[cmd]) return this.commands[cmd](args, io);
+    if (cmd === "cut" || ((cmd === "head" || cmd === "tail") && args.some((a) => /^-c/.test(a)))) return this.runtimeTool(cmd, args, io);
     const out = (t: string) => io.stdout(t);
     const lines = (t: string | undefined) => (t ?? "").split("\n").filter((l, i, a) => !(i === a.length - 1 && l === ""));
     const emit = (ls: string[]) => {
@@ -748,12 +793,56 @@ export class Shell {
         if (r.stderr) io.stderr(r.stderr);
         return r.code;
       }
-      default:
+      default: {
         if (NOOP_COMMANDS.has(cmd)) return 0;
+        if (HOST_TOOLS.has(cmd) && hasBuiltin(cmd)) return this.runtimeTool(cmd, args, io);
         io.stderr(`podsim: ${cmd}: command not found\n`);
         return 127;
+      }
     }
   }
+}
+
+const HOST_TOOLS = new Set(["cut", "sed", "printf", "seq", "find", "date", "env", "printenv", "id", "whoami", "basename", "dirname", "expr", "nl", "diff", "rev", "fold", "yes", "hostname", "uname", "test", "["]);
+
+/** The simulator host as a runtime Host, with the work folder at /. */
+function hostMachine(cluster: Cluster, fs: FileSystem, vars: Map<string, string>): Host {
+  const rel = (p: string) => normalizePath(p).replace(/^\/+/, "");
+  const hostFs: Fs = {
+    read: (p) => {
+      const r = rel(p);
+      return r && fs.exists(r) && !fs.isDirectory(r) ? fs.readFile(r) : undefined;
+    },
+    isDir: (p) => rel(p) === "" || fs.isDirectory(rel(p)),
+    list: (p) => (rel(p) === "" || fs.isDirectory(rel(p)) ? fs.list(rel(p)).filter((n) => n !== ".keep") : undefined),
+    write: (p, data, append) => {
+      if (append) fs.appendFile(rel(p), data);
+      else fs.writeFile(rel(p), data);
+      return undefined;
+    },
+    remove: (p) => {
+      fs.remove(rel(p));
+      return undefined;
+    },
+    mkdir: (p) => {
+      fs.mkdir(rel(p));
+      return undefined;
+    },
+  };
+  return {
+    now: () => cluster.now(),
+    fs: hostFs,
+    tools: null,
+    env: { HOME: "/root", USER: "root", ...Object.fromEntries(vars) },
+    hostname: "controlplane",
+    podIP: "192.168.56.10",
+    uid: 0,
+    gid: 0,
+    groups: [],
+    caps: new Set(["CHOWN", "DAC_OVERRIDE", "NET_BIND_SERVICE", "SYS_ADMIN"]),
+    image: "ubuntu",
+    net: () => ({ stdout: "", stderr: "", code: 1 }),
+  };
 }
 
 function heredocOf(line: string): { delim: string; strip: boolean; quoted: boolean } | undefined {

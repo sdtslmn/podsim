@@ -934,6 +934,11 @@ function serveCommand(x: Exec, port: number, server: Server, io: IO, name: strin
 
 let otherListen: (x: Exec, port: number) => boolean = () => false;
 /** The pod runtime tells the interpreter about ports other containers in the pod already use. */
+/** True if the container runtime implements this command. */
+export function hasBuiltin(name: string): boolean {
+  return name in BUILTINS;
+}
+
 export function setPortChecker(fn: (x: Exec, port: number) => boolean): void {
   otherListen = fn;
 }
@@ -1204,6 +1209,30 @@ const BUILTINS: Record<string, Builtin> = {
     if (ms > 0) yield { sleep: ms };
     return 0;
   },
+  stress: function* (x, args, io) {
+    // polinux/stress: burn CPU or memory until --timeout (or forever).
+    const val = (names: string[]) => {
+      const i = args.findIndex((a) => names.includes(a));
+      return i >= 0 ? args[i + 1] : undefined;
+    };
+    const cpu = parseInt(val(["--cpu", "-c"]) ?? "0", 10);
+    const vm = parseInt(val(["--vm", "-m"]) ?? "0", 10);
+    const io_ = parseInt(val(["--io", "-i"]) ?? "0", 10);
+    const timeout = val(["--timeout", "-t"]);
+    if (!cpu && !vm && !io_) {
+      io.err("`stress' imposes certain types of compute stress on your system\n\nUsage: stress [OPTION [ARG]] ...\n -c, --cpu N        spawn N workers spinning on sqrt()\n -m, --vm N         spawn N workers spinning on malloc()/free()\n     --vm-bytes B   malloc B bytes per vm worker (default is 256MB)\n -t, --timeout N    timeout after N seconds\n");
+      return 1;
+    }
+    io.out(`stress: info: [1] dispatching hogs: ${cpu} cpu, ${io_} io, ${vm} vm, 0 hdd\n`);
+    const ms = timeout ? parseSleep(timeout) : "forever";
+    if (ms === "forever" || ms === undefined) {
+      yield { block: "stress" };
+      return 0;
+    }
+    if (ms > 0) yield { sleep: ms };
+    io.out(`stress: info: [1] successful run completed in ${Math.round(ms / 1000)}s\n`);
+    return 0;
+  },
   date: sync((x, args, io) => {
     if (args.includes("-s") || args.some((a) => a.startsWith("--set"))) {
       if (!x.host.caps.has("SYS_TIME")) {
@@ -1432,10 +1461,15 @@ const BUILTINS: Record<string, Builtin> = {
     return code;
   }),
   head: sync((x, args, io, name) => {
+    const bytes = flag(args, "-c");
     const n = parseInt(flag(args, "-n") ?? args.find((a) => /^-\d+$/.test(a))?.slice(1) ?? "10", 10);
-    const files = args.filter((a, i) => !a.startsWith("-") && args[i - 1] !== "-n");
+    const files = args.filter((a, i) => !a.startsWith("-") && args[i - 1] !== "-n" && args[i - 1] !== "-c");
     const text = readInputs(x, files, io, name);
     if (text === undefined) return 1;
+    if (bytes !== undefined) {
+      io.out(text.slice(0, parseInt(bytes, 10)));
+      return 0;
+    }
     const ls = lines(text).slice(0, n);
     if (ls.length) io.out(ls.join("\n") + "\n");
     return 0;
@@ -1536,29 +1570,199 @@ const BUILTINS: Record<string, Builtin> = {
     return 0;
   }),
   cut: sync((x, args, io, name) => {
-    const d = flag(args, "-d") ?? "\t";
-    const fields = (flag(args, "-f") ?? "1").split(",").map((n) => parseInt(n, 10) - 1);
-    const files = args.filter((a, i) => !a.startsWith("-") && !["-d", "-f"].includes(args[i - 1] ?? ""));
+    // cut -d D -f LIST, cut -c LIST, with ranges like 1,3 2-4 3- -2 and attached forms (-d: -f2).
+    let d = "\t";
+    let list: string | undefined;
+    let mode: "f" | "c" = "f";
+    const files: string[] = [];
+    for (let i = 0; i < args.length; i++) {
+      const a = args[i];
+      const m = a.match(/^-([dfcb])(.*)$/);
+      if (m) {
+        const val = m[2] !== "" ? m[2] : args[++i] ?? "";
+        if (m[1] === "d") d = val;
+        else {
+          list = val;
+          mode = m[1] === "f" ? "f" : "c";
+        }
+      } else if (a.startsWith("--delimiter=")) d = a.slice(12);
+      else if (a.startsWith("--fields=")) list = a.slice(9);
+      else if (a.startsWith("--characters=")) ((list = a.slice(13)), (mode = "c"));
+      else files.push(a);
+    }
+    if (!list) {
+      io.err(`${name}: you must specify a list of bytes, characters, or fields\n`);
+      return 1;
+    }
+    const ranges = list.split(",").map((r) => {
+      const [a, b] = r.includes("-") ? r.split("-") : [r, r];
+      return [a ? parseInt(a, 10) : 1, b ? parseInt(b, 10) : Infinity] as [number, number];
+    });
+    const pick = <T,>(items: T[]) => items.filter((_, i) => ranges.some(([lo, hi]) => i + 1 >= lo && i + 1 <= hi));
     const text = readInputs(x, files, io, name);
     if (text === undefined) return 1;
-    const out = lines(text).map((l) => fields.map((f) => l.split(d)[f] ?? "").join(d));
+    const out = lines(text).map((l) => (mode === "c" ? pick([...l]).join("") : l.includes(d) ? pick(l.split(d)).join(d) : l));
     if (out.length) io.out(out.join("\n") + "\n");
     return 0;
   }),
   sed: sync((x, args, io, name) => {
-    const expr = args.find((a) => /^s(.).*\1.*\1[gi]*$/.test(a));
-    const files = args.filter((a) => a !== expr && !a.startsWith("-"));
-    const text = readInputs(x, files, io, name);
-    if (text === undefined) return 1;
-    if (!expr) {
-      io.out(text);
-      return 0;
+    // A useful subset of GNU sed: -n -i -e -E, addresses (N, $, /re/, ranges) and s, d, p, q commands.
+    const scripts: string[] = [];
+    const files: string[] = [];
+    let quiet = false;
+    let inPlace = false;
+    let ere = false;
+    for (let i = 0; i < args.length; i++) {
+      const a = args[i];
+      if (a === "-e" || a === "--expression") scripts.push(args[++i] ?? "");
+      else if (a.startsWith("--expression=")) scripts.push(a.slice(13));
+      else if (a === "-n" || a === "--quiet" || a === "--silent") quiet = true;
+      else if (a === "-E" || a === "-r" || a === "--regexp-extended") ere = true;
+      else if (a === "-i" || a.startsWith("-i") || a === "--in-place") inPlace = true;
+      else if (/^-[nEri]+$/.test(a)) {
+        if (a.includes("n")) quiet = true;
+        if (a.includes("E") || a.includes("r")) ere = true;
+        if (a.includes("i")) inPlace = true;
+      } else if (!scripts.length && !a.startsWith("-")) scripts.push(a);
+      else files.push(a);
     }
-    const sep = expr[1];
-    const [, from, to, fl] = expr.split(sep);
-    const result = text.replace(new RegExp(from, (fl ?? "").includes("g") ? "g" : ""), to ?? "");
-    if (args.includes("-i") && files[0]) x.host.fs.write(x.abs(files[0]), result, false);
-    else io.out(result);
+    if (!scripts.length) {
+      io.err("Usage: sed [OPTION]... {script-only-if-no-other-script} [input-file]...\n");
+      return 1;
+    }
+    const toJs = (re: string) => (ere ? re : re.replace(/\\([(){}+?|])|([(){}+?|])/g, (_m, esc, plain) => (esc ? esc : "\\" + plain)));
+    type Addr = { line?: number; last?: boolean; re?: RegExp };
+    type Cmd = { a1?: Addr; a2?: Addr; neg: boolean; op: string; re?: RegExp; rep?: string; global?: boolean; print?: boolean; nth?: number; inRange?: boolean };
+    const cmds: Cmd[] = [];
+    const parseAddr = (src: string, i: number): [Addr | undefined, number] => {
+      if (/\d/.test(src[i] ?? "")) {
+        const m = src.slice(i).match(/^\d+/)!;
+        return [{ line: parseInt(m[0], 10) }, i + m[0].length];
+      }
+      if (src[i] === "$") return [{ last: true }, i + 1];
+      if (src[i] === "/" || src[i] === "\\") {
+        const d = src[i] === "\\" ? src[++i] : "/";
+        let j = i + 1;
+        let body = "";
+        while (j < src.length && src[j] !== d) {
+          if (src[j] === "\\" && src[j + 1] === d) {
+            body += d;
+            j += 2;
+            continue;
+          }
+          body += src[j++];
+        }
+        return [{ re: new RegExp(toJs(body)) }, j + 1];
+      }
+      return [undefined, i];
+    };
+    for (const script of scripts) {
+      let i = 0;
+      const src = script;
+      while (i < src.length) {
+        while (i < src.length && /[\s;]/.test(src[i])) i++;
+        if (i >= src.length) break;
+        const cmd: Cmd = { neg: false, op: "" };
+        [cmd.a1, i] = parseAddr(src, i);
+        if (cmd.a1 && src[i] === ",") [cmd.a2, i] = parseAddr(src, i + 1);
+        while (src[i] === " ") i++;
+        if (src[i] === "!") {
+          cmd.neg = true;
+          i++;
+        }
+        cmd.op = src[i++] ?? "";
+        if (cmd.op === "s") {
+          const d = src[i++];
+          const parts: string[] = [];
+          let cur = "";
+          while (i < src.length && parts.length < 2) {
+            if (src[i] === "\\" && src[i + 1] === d) {
+              cur += d;
+              i += 2;
+              continue;
+            }
+            if (src[i] === d) {
+              parts.push(cur);
+              cur = "";
+              i++;
+              continue;
+            }
+            cur += src[i++];
+          }
+          const fl = src.slice(i).match(/^[gpiI0-9]*/)![0];
+          i += fl.length;
+          if (parts.length < 2) {
+            io.err(`sed: -e expression #1, char ${src.length}: unterminated \`s' command\n`);
+            return 1;
+          }
+          cmd.re = new RegExp(toJs(parts[0]), fl.includes("i") || fl.includes("I") ? "i" : "");
+          cmd.rep = parts[1];
+          cmd.global = fl.includes("g");
+          cmd.print = fl.includes("p");
+          const nth = fl.match(/\d+/);
+          if (nth) cmd.nth = parseInt(nth[0], 10);
+        } else if (!["d", "p", "q", "=", "{", "}"].includes(cmd.op)) {
+          io.err(`sed: -e expression #1, char ${i}: unknown command: \`${cmd.op}'\n`);
+          return 1;
+        }
+        cmds.push(cmd);
+      }
+    }
+    const targets = inPlace ? files : [null];
+    for (const file of targets) {
+      const text = file === null ? readInputs(x, files, io, name) : readInputs(x, [file], io, name);
+      if (text === undefined) return 1;
+      const lines = text.endsWith("\n") ? text.slice(0, -1).split("\n") : text.split("\n");
+      if (text === "") lines.length = 0;
+      let out = "";
+      let quit = false;
+      for (let n = 0; n < lines.length && !quit; n++) {
+        let line = lines[n];
+        let deleted = false;
+        const isLast = n === lines.length - 1;
+        const hit = (a: Addr) => (a.line !== undefined ? a.line === n + 1 : a.last ? isLast : a.re!.test(line));
+        for (const c of cmds) {
+          let match = true;
+          if (c.a1 && !c.a2) match = hit(c.a1);
+          else if (c.a1 && c.a2) {
+            if (!c.inRange && hit(c.a1)) {
+              c.inRange = true;
+              match = true;
+              if (c.a2.line !== undefined && c.a2.line <= n + 1) c.inRange = false;
+            } else if (c.inRange) {
+              match = true;
+              if (hit(c.a2)) c.inRange = false;
+            } else match = false;
+          }
+          if (c.neg) match = !match;
+          if (!match) continue;
+          if (c.op === "d") {
+            deleted = true;
+            break;
+          }
+          if (c.op === "p") out += line + "\n";
+          if (c.op === "=") out += `${n + 1}\n`;
+          if (c.op === "q") quit = true;
+          if (c.op === "s") {
+            const re = new RegExp(c.re!.source, c.re!.flags + (c.global || c.nth ? "g" : ""));
+            let count = 0;
+            const replaced = line.replace(re, (...m) => {
+              const groups = m.slice(0, -2) as string[];
+              count++;
+              if (c.nth && (c.global ? count < c.nth : count !== c.nth)) return groups[0];
+              return c.rep!.replace(/\\(\d)|&|\\n|\\t|\\\\/g, (t, g) => (t === "&" ? groups[0] : t === "\\n" ? "\n" : t === "\\t" ? "\t" : t === "\\\\" ? "\\" : groups[parseInt(g, 10)] ?? ""));
+            });
+            const changed = replaced !== line;
+            line = replaced;
+            if (changed && c.print) out += line + "\n";
+          }
+        }
+        if (!deleted && !quiet) out += line + "\n";
+      }
+      for (const c of cmds) c.inRange = false;
+      if (file !== null) x.host.fs.write(x.abs(file), out, false);
+      else io.out(out);
+    }
     return 0;
   }),
   awk: sync((x, args, io, name) => {
@@ -1633,7 +1837,10 @@ const BUILTINS: Record<string, Builtin> = {
     return 0;
   }),
   find: sync((x, args, io) => {
-    const root = x.abs(args.find((a) => !a.startsWith("-")) ?? ".");
+    const start = args.find((a, i) => !a.startsWith("-") && !(i > 0 && args[i - 1].startsWith("-"))) ?? ".";
+    const root = x.abs(start);
+    // Print paths the way they were asked for: relative starts stay relative.
+    const shown = (p: string) => (start.startsWith("/") ? p : (start.replace(/\/$/, "") || ".") + p.slice(root === "/" ? 0 : root.length));
     const nameIdx = args.indexOf("-name");
     const pat = nameIdx >= 0 ? args[nameIdx + 1] : undefined;
     const out: string[] = [];
@@ -1647,7 +1854,7 @@ const BUILTINS: Record<string, Builtin> = {
     };
     if (!pat || globMatch(pat, root.split("/").pop() ?? "")) out.unshift(root);
     walk(root, 0);
-    io.out(out.join("\n") + "\n");
+    io.out(out.map((p) => (p === root ? start : shown(p).replace(/^\.\/\//, "./"))).join("\n") + "\n");
     return 0;
   }),
   df: sync((x, args, io) => {

@@ -1,9 +1,8 @@
 # Labs
 
-Each YAML file in this folder is one lab. They are grouped by level:
+Each YAML file in this folder is one lab:
 
 - `beginner/`: first contact with Pods, Deployments, Services and configuration
-- `intermediate/`: planned, CKA and CKAD level tasks
-- `advanced/`: planned, security and troubleshooting scenarios
+- `ckad/`: the CKAD track, numbered by exam domain (design and build, deployment, observability, configuration and security, networking)
 
-See [../docs/writing-labs.md](../docs/writing-labs.md) for the format, and run `npm run validate-labs` after any change.
+Mock exams live in [`../exams/`](../exams). See [../docs/writing-labs.md](../docs/writing-labs.md) for both formats, and run `npm run validate-labs` after any change.

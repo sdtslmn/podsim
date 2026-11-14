@@ -5,6 +5,7 @@
 
 import { parse as parseYaml, parseAllDocuments, stringify } from "yaml";
 import type { Cluster } from "../cluster.js";
+import { K8S_VERSION } from "../version.js";
 import { toBase64 } from "../cluster.js";
 import type { FileSystem } from "../fs.js";
 import type { KObject } from "../types.js";
@@ -244,7 +245,7 @@ function renderChart(chart: Chart, release: string, namespace: string, values: R
     Values: values,
     Release: { Name: release, Namespace: namespace, Service: "Helm", Revision: revision, IsInstall: !isUpgrade, IsUpgrade: isUpgrade },
     Chart: { Name: chart.name, Version: chart.version, AppVersion: chart.appVersion, Description: chart.description },
-    Capabilities: { KubeVersion: { Version: "v1.34.1", Major: "1", Minor: "34" }, APIVersions: { Has: () => true } },
+    Capabilities: { KubeVersion: { Version: K8S_VERSION, Major: "1", Minor: K8S_VERSION.split(".")[1] }, APIVersions: { Has: () => true } },
     Template: { BasePath: `${chart.name}/templates` },
   };
   let manifest = "";

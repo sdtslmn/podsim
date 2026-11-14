@@ -1,0 +1,57 @@
+id: ckad-07-rolling-update
+title: Tune a rolling update
+level: intermediate
+minutes: 8
+tracks: [ckad]
+topic: Application Deployment
+intro: |
+  The Deployment `api` runs 4 replicas of nginx:1.27. The team wants
+  updates that never drop below full capacity: one extra Pod may be
+  created during the update, and no Pod may be unavailable.
+
+  These are the `maxSurge` and `maxUnavailable` settings of the
+  RollingUpdate strategy.
+setup:
+  - kubectl create deployment api --image=nginx:1.27 --replicas=4
+tasks:
+  - Set the rolling update strategy of `api` to `maxSurge` 1 and `maxUnavailable` 0.
+  - Update the image of the container `nginx` to `nginx:1.29` and wait for the rollout to finish.
+  - Annotate the Deployment with `kubernetes.io/change-cause="upgrade to 1.29"` so the reason shows in the rollout history.
+checks:
+  - name: maxSurge is 1
+    kind: Deployment
+    resource: api
+    path: .spec.strategy.rollingUpdate.maxSurge
+    equals: 1
+  - name: maxUnavailable is 0
+    kind: Deployment
+    resource: api
+    path: .spec.strategy.rollingUpdate.maxUnavailable
+    equals: 0
+  - name: The image is nginx:1.29
+    kind: Deployment
+    resource: api
+    path: .spec.template.spec.containers[0].image
+    equals: nginx:1.29
+  - name: All 4 replicas are updated and available
+    kind: Deployment
+    resource: api
+    path: .status.updatedReplicas
+    equals: 4
+  - name: The rollout history shows the change cause
+    command: kubectl rollout history deployment api
+    outputMatches: upgrade to 1.29
+hints:
+  - "kubectl patch deployment api -p '{\"spec\":{\"strategy\":{\"rollingUpdate\":{\"maxSurge\":1,\"maxUnavailable\":0}}}}'"
+  - "kubectl set image deployment/api nginx=nginx:1.29, then kubectl rollout status deployment/api"
+  - "kubectl annotate deployment api kubernetes.io/change-cause=\"upgrade to 1.29\""
+solution:
+  - "kubectl patch deployment api -p '{\"spec\":{\"strategy\":{\"rollingUpdate\":{\"maxSurge\":1,\"maxUnavailable\":0}}}}'"
+  - kubectl set image deployment/api nginx=nginx:1.29
+  - kubectl annotate deployment api kubernetes.io/change-cause="upgrade to 1.29"
+  - kubectl rollout status deployment/api --timeout=120s
+learned: |
+  maxSurge is how far above the desired count a rollout may go, and
+  maxUnavailable how far below. 1 and 0 trade speed for capacity: one new Pod
+  must be ready before an old one is removed. Both accept numbers or
+  percentages; the default is 25% each.

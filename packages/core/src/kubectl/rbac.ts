@@ -81,6 +81,31 @@ export function canI(cluster: Cluster, id: Identity, verb: string, resourceArg: 
   return false;
 }
 
+/** Every rule that applies to an identity in a namespace, for kubectl auth can-i --list. */
+export function rulesFor(cluster: Cluster, id: Identity, ns: string | undefined): Rule[] {
+  if (id.user === "kubernetes-admin" || id.groups.includes("system:masters") || id.groups.includes("kubeadm:cluster-admins")) {
+    return [{ apiGroups: ["*"], resources: ["*"], verbs: ["*"] }, { nonResourceURLs: ["*"], verbs: ["*"] }];
+  }
+  const rules: Rule[] = [];
+  for (const b of cluster.list("ClusterRoleBinding")) {
+    if (((b.subjects as Subject[]) ?? []).some((s) => subjectMatches(s, id))) rules.push(...rulesOf(cluster, b.roleRef as { kind: string; name: string }));
+  }
+  if (ns) {
+    for (const b of cluster.list("RoleBinding", ns)) {
+      if (((b.subjects as Subject[]) ?? []).some((s) => subjectMatches(s, id, ns))) rules.push(...rulesOf(cluster, b.roleRef as { kind: string; name: string }, ns));
+    }
+  }
+  // Every authenticated user can review its own access and read discovery endpoints.
+  rules.push(
+    { apiGroups: ["authentication.k8s.io"], resources: ["selfsubjectreviews"], verbs: ["create"] },
+    { apiGroups: ["authorization.k8s.io"], resources: ["selfsubjectaccessreviews", "selfsubjectrulesreviews"], verbs: ["create"] },
+    { nonResourceURLs: ["/api", "/api/*", "/apis", "/apis/*", "/healthz", "/livez", "/openapi", "/openapi/*", "/readyz", "/version", "/version/"], verbs: ["get"] },
+  );
+  return rules;
+}
+
+export type { Rule as RbacRule };
+
 export function buildRole(kind: "Role" | "ClusterRole", name: string, ns: string | undefined, verbs: string[], resources: string[], resourceNames: string[]): KObject {
   const byGroup = new Map<string, string[]>();
   for (const r of resources) {

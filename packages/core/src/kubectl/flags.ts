@@ -41,6 +41,13 @@ const BOOLEAN_FLAGS = new Set([
   "local",
   "raw",
   "minify",
+  "containers",
+  "expose",
+  "share-processes",
+  "same-node",
+  "keep-labels",
+  "keep-annotations",
+  "recursive-explain",
 ]);
 
 const SHORT_ALIASES: Record<string, string> = {

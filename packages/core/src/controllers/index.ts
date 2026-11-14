@@ -7,6 +7,7 @@ import { schedulePods } from "./scheduler.js";
 import { runKubelet } from "./kubelet.js";
 import { reconcileEndpoints } from "./endpoints.js";
 import { reconcileNamespaces, reconcileVolumeClaims, reconcileQuotas, reconcileIngresses } from "./misc.js";
+import { reconcileHPAs } from "./hpa.js";
 import { reconcileJobs, reconcileCronJobs, reconcileDaemonSets, reconcileStatefulSets } from "./workloads.js";
 
 export interface ProbeState {
@@ -70,4 +71,5 @@ export function runControllers(cluster: Cluster, t: number): void {
   }
   reconcileQuotas(cluster);
   reconcileIngresses(cluster, t);
+  reconcileHPAs(cluster, t);
 }

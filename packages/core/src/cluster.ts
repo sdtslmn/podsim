@@ -37,7 +37,8 @@ export interface EventSource {
 
 const NODE_IPS = ["192.168.56.10", "192.168.56.11", "192.168.56.12", "192.168.56.13", "192.168.56.14"];
 
-export const K8S_VERSION = "v1.34.1";
+export { K8S_VERSION } from "./version.js";
+import { K8S_VERSION } from "./version.js";
 
 function key(kind: string, namespace: string | undefined, name: string): string {
   return `${kind}/${namespace ?? ""}/${name}`;
@@ -981,6 +982,42 @@ export class Cluster {
           { name: "https", port: 443, targetPort: "https", nodePort: 30443, protocol: "TCP", appProtocol: "https" },
         ],
       },
+    }).metadata.creationTimestamp = created;
+
+    // metrics-server, so kubectl top and HorizontalPodAutoscalers work.
+    const msLabels = { "k8s-app": "metrics-server" };
+    this.create({
+      apiVersion: "apps/v1",
+      kind: "Deployment",
+      metadata: { name: "metrics-server", namespace: "kube-system", labels: { ...msLabels } },
+      spec: {
+        replicas: 1,
+        selector: { matchLabels: { ...msLabels } },
+        template: {
+          metadata: { labels: { ...msLabels } },
+          spec: {
+            priorityClassName: "system-cluster-critical",
+            serviceAccountName: "default",
+            containers: [
+              {
+                name: "metrics-server",
+                image: "registry.k8s.io/metrics-server/metrics-server:v0.8.0",
+                args: ["--cert-dir=/tmp", "--secure-port=10250", "--kubelet-preferred-address-types=InternalIP,ExternalIP,Hostname", "--kubelet-use-node-status-port", "--metric-resolution=15s", "--kubelet-insecure-tls"],
+                ports: [{ name: "https", containerPort: 10250, protocol: "TCP" }],
+                resources: { requests: { cpu: "100m", memory: "200Mi" } },
+                securityContext: { runAsUser: 1000, runAsNonRoot: true, readOnlyRootFilesystem: true, allowPrivilegeEscalation: false, capabilities: { drop: ["ALL"] } },
+              },
+            ],
+            nodeSelector: { "kubernetes.io/os": "linux" },
+          },
+        },
+      },
+    }).metadata.creationTimestamp = created;
+    this.create({
+      apiVersion: "v1",
+      kind: "Service",
+      metadata: { name: "metrics-server", namespace: "kube-system", labels: { ...msLabels } },
+      spec: { selector: { ...msLabels }, ports: [{ name: "https", port: 443, targetPort: "https", protocol: "TCP" }] },
     }).metadata.creationTimestamp = created;
 
     mk({

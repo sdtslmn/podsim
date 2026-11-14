@@ -4,6 +4,8 @@ import type { Cluster } from "../cluster.js";
 import type { FileSystem } from "../fs.js";
 import { KubeError } from "../types.js";
 import { Flags, parseArgs } from "./flags.js";
+import { cmdTop, cmdEvents, cmdDebug, cmdAutoscale } from "./debug.js";
+import { cmdExplain } from "./explain.js";
 import { authorize, parseTargets, type Ctx, type IO, type KubectlState } from "./common.js";
 import { parseAs } from "./rbac.js";
 import { KINDS } from "../kinds.js";
@@ -21,8 +23,6 @@ import {
   cmdVersion,
   cmdClusterInfo,
   cmdApiResources,
-  cmdTop,
-  cmdExplain,
   cmdEdit,
   cmdPortForward,
   cmdKustomize,
@@ -180,7 +180,7 @@ export class Kubectl {
       case "api-resources":
         return cmdApiResources(ctx, f);
       case "top":
-        return cmdTop(ctx);
+        return cmdTop(ctx, f);
       case "explain":
         return cmdExplain(ctx, f);
       case "edit":
@@ -193,13 +193,16 @@ export class Kubectl {
       case "cp":
       case "attach":
       case "debug":
+        return cmdDebug(ctx, f);
+      case "events":
+        return cmdEvents(ctx, f);
+      case "autoscale":
+        return cmdAutoscale(ctx, f);
       case "kustomize":
         return cmdKustomize(ctx, f);
       case "certificate":
       case "plugin":
-      case "events":
       case "diff":
-      case "autoscale":
         return notSimulated(ctx, cmd);
       default:
         ctx.io.stderr(`error: unknown command "${cmd}" for "kubectl"\n\nDid you mean this?\n\t${suggest(cmd)}\n\nRun 'kubectl --help' for usage.\n`);

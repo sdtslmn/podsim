@@ -7,10 +7,10 @@ import * as path from "node:path";
 import * as readline from "node:readline";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
-import { Cluster, Shell, LabSession, MemoryFS, parseLab, K8S_VERSION, type IO, type Lab } from "@podsim/core";
+import { Cluster, Shell, LabSession, MemoryFS, parseLab, parseExam, examTaskLabs, ExamSession, K8S_VERSION, type IO, type Lab, type Exam } from "@podsim/core";
 import { NodeFS } from "./nodefs.js";
 
-const VERSION = "0.1.0";
+const VERSION = "0.2.0";
 const here = path.dirname(fileURLToPath(import.meta.url));
 
 // ---------------------------------------------------------------- colours
@@ -63,6 +63,7 @@ function wrap(text: string, width = Math.min(process.stdout.columns || 90, 100) 
 
 interface Options {
   labsDir: string;
+  examsDir: string;
   workDir: string;
   exec?: string;
   command?: string;
@@ -72,12 +73,14 @@ interface Options {
 function parseCli(argv: string[]): Options {
   const opts: Options = {
     labsDir: process.env.PODSIM_LABS ?? findLabsDir(),
+    examsDir: process.env.PODSIM_EXAMS ?? findDir("exams"),
     workDir: process.env.PODSIM_WORKDIR ?? path.resolve(process.cwd(), "podsim-work"),
   };
   const rest: string[] = [];
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === "--labs") opts.labsDir = path.resolve(argv[++i]);
+    else if (a === "--exams") opts.examsDir = path.resolve(argv[++i]);
     else if (a === "--workdir") opts.workDir = path.resolve(argv[++i]);
     else if (a === "-c" || a === "--exec") opts.exec = argv[++i];
     else if (a === "-v" || a === "--version") {
@@ -94,8 +97,34 @@ function parseCli(argv: string[]): Options {
 }
 
 function findLabsDir(): string {
-  const candidates = [path.resolve(here, "..", "..", "..", "labs"), path.resolve(here, "..", "labs"), path.resolve(process.cwd(), "labs")];
+  return findDir("labs");
+}
+
+function findDir(name: string): string {
+  const candidates = [path.resolve(here, "..", "..", "..", name), path.resolve(here, "..", name), path.resolve(process.cwd(), name)];
   return candidates.find((c) => fs.existsSync(c)) ?? candidates[0];
+}
+
+function loadExams(dir: string): Exam[] {
+  if (!fs.existsSync(dir)) return [];
+  const exams: Exam[] = [];
+  for (const f of fs.readdirSync(dir).sort()) {
+    if (!/\.ya?ml$/.test(f)) continue;
+    try {
+      exams.push(parseExam(fs.readFileSync(path.join(dir, f), "utf8"), f));
+    } catch (e) {
+      console.error(yellow(`warning: skipping ${f}: ${(e as Error).message}`));
+    }
+  }
+  return exams;
+}
+
+function listExams(exams: Exam[]): string {
+  if (!exams.length) return "No mock exams found.";
+  const lines = [bold("Mock exams"), ""];
+  for (const e of exams) lines.push(`  ${cyan(e.id.padEnd(16))} ${e.title}  ${dim(`(${e.tasks.length} tasks, ${e.minutes} min, pass at ${e.passPercent}%)`)}`);
+  lines.push("", `Start one with ${cyan("podsim exam " + exams[0].id)}.`);
+  return lines.join("\n");
 }
 
 function printUsage(): void {
@@ -105,11 +134,14 @@ Usage:
   podsim                     open the practice shell (free sandbox)
   podsim labs                list the labs
   podsim lab <id|number>     start a lab, e.g. podsim lab 1
-  podsim validate-labs       check that every lab is solved by its own solution
+  podsim exams               list the timed mock exams
+  podsim exam [id]           start a mock exam (120 minutes, scored at the end)
+  podsim validate-labs       check that every lab and exam task is solved by its own solution
   podsim -c "<command>"      run one command on a fresh cluster and exit
 
 Options:
   --labs <dir>      folder with lab YAML files (default: the repo's labs folder)
+  --exams <dir>     folder with mock exam YAML files (default: the repo's exams folder)
   --workdir <dir>   where your files go (default: ./podsim-work)
   -v, --version     print the version`);
 }
@@ -220,6 +252,7 @@ class Repl {
   private done: Set<string>;
   private lab?: Lab;
   private session?: LabSession;
+  private exam?: ExamSession;
   private shell!: Shell;
   private cluster!: Cluster;
   private rl!: readline.Interface;
@@ -410,6 +443,89 @@ EDITOR (e.g. EDITOR="code --wait") to open them with vi/nano/code from here.`);
     });
   }
 
+  async startExam(exam: Exam): Promise<void> {
+    this.exam = new ExamSession(exam, { fsFactory: (host) => this.workFolder(`exam-${exam.id}/${host}`, true) });
+    this.print("");
+    this.print(bold(exam.title) + dim(`  (${exam.tasks.length} tasks, ${exam.minutes} minutes, pass at ${exam.passPercent}%)`));
+    this.print("");
+    this.print(wrap(md(exam.intro)));
+    this.print("");
+    this.print(`Exam commands: ${cyan("tasks")}, ${cyan("task N")}, ${cyan("flag N")}, ${cyan("time")}, ${cyan("end")} (finish and score). ${cyan("quit")} leaves without scoring.`);
+    this.print(`You are on the base node. Start with ${cyan("task 1")}.`);
+  }
+
+  private showExamTask(n: number): void {
+    const t = this.exam!.task(n);
+    if (!t) {
+      this.print(red(`There is no task ${n}.`));
+      return;
+    }
+    this.print("");
+    this.print(bold(`Task ${t.n} of ${this.exam!.exam.tasks.length}`) + dim(`  weight ${t.weight}%  ·  ${t.domain}${this.exam!.flagged.has(n) ? "  ·  flagged" : ""}`));
+    this.print(`You must connect to the correct host. Failure to do so may result in a zero score.`);
+    this.print(`  ${cyan(`ssh ${t.host}`)}`);
+    this.print("");
+    this.print(wrap(md(t.text)));
+    this.print("");
+  }
+
+  private async examCommand(line: string): Promise<boolean> {
+    const ex = this.exam!;
+    const m = line.match(/^(tasks|task|time|flag|unflag|end|submit|help)(?:\s+(\d+))?$/);
+    if (!m || ex.shell?.kubectl.state.session) return false;
+    const n = m[2] ? parseInt(m[2], 10) : undefined;
+    switch (m[1]) {
+      case "tasks":
+        for (const t of ex.exam.tasks) this.print(`  ${ex.flagged.has(t.n) ? yellow("⚑") : " "} ${String(t.n).padStart(2)}. ${t.title.padEnd(44)} ${dim(`${t.weight}%  ${t.host}`)}${ex.visited(t.n) ? dim("  visited") : ""}`);
+        return true;
+      case "task": {
+        const cur = ex.taskOnHost();
+        this.showExamTask(n ?? cur?.n ?? 1);
+        return true;
+      }
+      case "time":
+        this.print(`${fmtTime(ex.remainingMs())} left.`);
+        return true;
+      case "flag":
+      case "unflag":
+        if (!n || !ex.task(n)) {
+          this.print(red("Usage: flag N"));
+          return true;
+        }
+        if (m[1] === "flag") ex.flagged.add(n);
+        else ex.flagged.delete(n);
+        this.print(m[1] === "flag" ? `Task ${n} flagged for review.` : `Task ${n} unflagged.`);
+        return true;
+      case "end":
+      case "submit":
+        await this.endExam();
+        return true;
+      case "help":
+        this.print(`Exam commands: tasks, task N, flag N, unflag N, time, end. Work on a task with ssh HOST, return with exit.`);
+        return true;
+    }
+    return false;
+  }
+
+  private async endExam(): Promise<void> {
+    const ex = this.exam!;
+    this.print(dim("Scoring your exam..."));
+    const r = await ex.grade();
+    this.print("");
+    for (const t of r.tasks) {
+      const pct = Math.round((t.score / t.task.weight) * 100);
+      const mark = pct === 100 ? green("✔") : pct === 0 ? red("✘") : yellow("◐");
+      this.print(`${mark} ${String(t.task.n).padStart(2)}. ${t.task.title.padEnd(44)} ${t.score.toFixed(1).padStart(4)} / ${t.task.weight}`);
+      for (const c of t.checks.filter((c) => !c.passed)) this.print(dim(`        ✘ ${c.name}${c.detail ? `  (${c.detail})` : ""}`));
+    }
+    this.print("");
+    this.print(bold(`Score: ${r.percent}%`) + `  (pass at ${ex.exam.passPercent}%, time used ${fmtTime(r.usedMs)})`);
+    this.print(r.passed ? green(bold("PASS")) : red(bold("NOT PASSED")));
+    this.print(dim("Solutions: podsim exam-solutions " + ex.exam.id + ". Type quit to leave, or sandbox for free practice."));
+    this.exam = undefined;
+    this.startSandbox();
+  }
+
   private nextLab(): Lab | undefined {
     if (!this.lab) return this.labs[0];
     const i = this.labs.findIndex((l) => l.id === this.lab!.id);
@@ -417,6 +533,10 @@ EDITOR (e.g. EDITOR="code --wait") to open them with vi/nano/code from here.`);
   }
 
   private prompt(): string {
+    if (this.exam) {
+      const p = this.exam.prompt();
+      return p.startsWith("candidate@") ? `${dim(`[${fmtTime(this.exam.remainingMs())}]`)} ${green(p.slice(0, p.indexOf(":")))}:${cyan("~")}$ ` : p;
+    }
     const inContainer = this.shell.sessionPrompt();
     if (inContainer) return inContainer;
     const tag = this.lab ? yellow(`[${this.lab.id.split("-")[0]}] `) : "";
@@ -454,11 +574,12 @@ EDITOR (e.g. EDITOR="code --wait") to open them with vi/nano/code from here.`);
     return this.cluster.list(k, scoped ? undefined : this.shell.kubectl.state.namespace).map((o) => o.metadata.name);
   }
 
-  async run(firstLab?: string): Promise<void> {
+  async run(firstLab?: string, exam?: Exam): Promise<void> {
     this.startSandbox();
     this.print(`${bold("PodSim")} ${VERSION}  ${dim("Kubernetes training simulator. Nothing here runs real containers.")}`);
     this.print(dim(`Simulated cluster: controlplane, node01, node02 (Kubernetes ${K8S_VERSION})`));
-    if (firstLab) {
+    if (exam) await this.startExam(exam);
+    else if (firstLab) {
       const lab = findLab(this.labs, firstLab);
       if (lab) await this.startLab(lab);
       else this.print(red(`No lab matches "${firstLab}".`));
@@ -493,7 +614,7 @@ EDITOR (e.g. EDITOR="code --wait") to open them with vi/nano/code from here.`);
   private async onLine(line: string): Promise<void> {
     if (this.busy) return;
     this.buffer = this.buffer ? this.buffer + "\n" + line : line;
-    if (this.shell.needsMoreInput(this.buffer)) {
+    if (this.exam ? this.exam.needsMoreInput(this.buffer) : this.shell.needsMoreInput(this.buffer)) {
       this.rl.setPrompt("> ");
       this.rl.prompt();
       return;
@@ -501,8 +622,14 @@ EDITOR (e.g. EDITOR="code --wait") to open them with vi/nano/code from here.`);
     const input = this.buffer;
     this.buffer = "";
     const trimmed = input.trim();
-    if (trimmed === "exit" || trimmed === "quit" || trimmed === "logout") {
+    if (trimmed === "quit" || (!this.exam && (trimmed === "exit" || trimmed === "logout"))) {
       this.rl.close();
+      return;
+    }
+    if (this.exam && (await this.examCommand(trimmed))) {
+      if (this.lastChar !== "\n") this.write("\n");
+      this.rl.setPrompt(this.prompt());
+      this.rl.prompt();
       return;
     }
     if (trimmed) {
@@ -515,7 +642,12 @@ EDITOR (e.g. EDITOR="code --wait") to open them with vi/nano/code from here.`);
         aborted: () => this.aborted,
       };
       try {
-        await this.shell.exec(input, io);
+        if (this.exam) {
+          if (this.exam.remainingMs() === 0 && !this.exam.finished) {
+            this.print(yellow("Time is up."));
+            await this.endExam();
+          } else await this.exam.exec(input, io);
+        } else await this.shell.exec(input, io);
       } catch (e) {
         this.print(red(`internal error: ${(e as Error).message}`));
         this.print(dim("Please report this at the project's GitHub issues page with the command you ran."));
@@ -526,6 +658,11 @@ EDITOR (e.g. EDITOR="code --wait") to open them with vi/nano/code from here.`);
     this.rl.setPrompt(this.prompt());
     this.rl.prompt();
   }
+}
+
+function fmtTime(ms: number): string {
+  const s = Math.floor(ms / 1000);
+  return `${Math.floor(s / 3600)}:${String(Math.floor((s % 3600) / 60)).padStart(2, "0")}:${String(s % 60).padStart(2, "0")}`;
 }
 
 // ---------------------------------------------------------------- main
@@ -558,8 +695,31 @@ async function main(): Promise<void> {
       await new Repl(opts).run(opts.labArg);
       return;
     case "validate-labs":
-      process.exit(await validateLabs(loadLabs(opts.labsDir)));
+      process.exit(await validateLabs([...loadLabs(opts.labsDir), ...loadExams(opts.examsDir).flatMap((e) => examTaskLabs(e))]));
       return;
+    case "exams":
+      console.log(listExams(loadExams(opts.examsDir)));
+      return;
+    case "exam": {
+      const exams = loadExams(opts.examsDir);
+      const exam = opts.labArg ? exams.find((e) => e.id === opts.labArg || e.id.endsWith(opts.labArg!)) : exams[0];
+      if (!exam) {
+        console.error(opts.labArg ? `No exam matches "${opts.labArg}". Run podsim exams.` : "No mock exams found.");
+        process.exit(1);
+      }
+      await new Repl(opts).run(undefined, exam);
+      return;
+    }
+    case "exam-solutions": {
+      const exam = loadExams(opts.examsDir).find((e) => e.id === opts.labArg) ?? loadExams(opts.examsDir)[0];
+      if (!exam) process.exit(1);
+      for (const t of exam.tasks) {
+        console.log(bold(`Task ${t.n}: ${t.title}`) + dim(`  (${t.host})`));
+        for (const step of t.solution) console.log(step.split("\n").map((l) => "  " + cyan(l)).join("\n"));
+        console.log("");
+      }
+      return;
+    }
     default:
       console.error(`Unknown command "${opts.command}". Run podsim --help.`);
       process.exit(1);

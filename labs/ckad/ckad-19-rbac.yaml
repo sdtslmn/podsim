@@ -1,0 +1,50 @@
+id: ckad-19-rbac
+title: Give an app read access with a ServiceAccount
+level: intermediate
+minutes: 10
+tracks: [ckad]
+topic: Application Environment, Configuration and Security
+intro: |
+  Pods talk to the API server as their ServiceAccount. By default that
+  account can do almost nothing; a Role grants permissions in a namespace
+  and a RoleBinding gives the Role to the account.
+
+  The Deployment `monitor` in the namespace `apps` needs to list Pods.
+setup:
+  - kubectl create namespace apps
+  - kubectl create deployment monitor -n apps --image=busybox:1.36 -- sleep 3600
+tasks:
+  - Create a ServiceAccount named `monitor` in the namespace `apps`.
+  - Create a Role `pod-reader` in `apps` that allows get, list and watch on pods, and bind it to the ServiceAccount with a RoleBinding named `monitor-pod-reader`.
+  - Make the Deployment `monitor` run as the ServiceAccount `monitor`.
+checks:
+  - name: ServiceAccount monitor exists
+    kind: ServiceAccount
+    namespace: apps
+    resource: monitor
+    expect: exists
+  - name: The account can list pods in apps
+    command: kubectl auth can-i list pods -n apps --as=system:serviceaccount:apps:monitor
+    outputMatches: "^yes"
+  - name: The account cannot delete pods
+    command: kubectl auth can-i delete pods -n apps --as=system:serviceaccount:apps:monitor
+    outputMatches: "^no"
+  - name: The Deployment uses the ServiceAccount
+    kind: Deployment
+    namespace: apps
+    resource: monitor
+    path: .spec.template.spec.serviceAccountName
+    equals: monitor
+hints:
+  - "kubectl create serviceaccount monitor -n apps"
+  - "kubectl create role pod-reader -n apps --verb=get,list,watch --resource=pods, then kubectl create rolebinding monitor-pod-reader -n apps --role=pod-reader --serviceaccount=apps:monitor"
+  - "kubectl set serviceaccount deployment monitor monitor -n apps"
+solution:
+  - kubectl create serviceaccount monitor -n apps
+  - kubectl create role pod-reader -n apps --verb=get,list,watch --resource=pods
+  - kubectl create rolebinding monitor-pod-reader -n apps --role=pod-reader --serviceaccount=apps:monitor
+  - kubectl set serviceaccount deployment monitor monitor -n apps
+learned: |
+  kubectl auth can-i VERB RESOURCE --as=system:serviceaccount:NS:NAME tests
+  permissions without logging in as the account. Use a ClusterRole and a
+  ClusterRoleBinding for access across all namespaces.

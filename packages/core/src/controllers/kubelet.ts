@@ -6,6 +6,7 @@
 // like the real thing. The pod status it writes matches a real kubelet's.
 
 import type { Cluster } from "../cluster.js";
+import { K8S_VERSION } from "../version.js";
 import type { ContainerSpec, KObject } from "../types.js";
 import { containerBehavior, parseImage } from "../images.js";
 import { fnv1a, isoTime, parseMemory, stableStringify } from "../util.js";
@@ -16,7 +17,7 @@ export { resolveEnv };
 
 const SRC = (host: string) => ({ component: "kubelet", host });
 
-type Kind = "init" | "sidecar" | "app";
+type Kind = "init" | "sidecar" | "app" | "ephemeral";
 
 function simFor(cluster: Cluster, pod: KObject): PodSim {
   const uid = pod.metadata.uid!;
@@ -71,6 +72,7 @@ function pullSeconds(image: string): string {
 
 function restartPolicyFor(pod: KObject, kind: Kind): string {
   if (kind === "sidecar") return "Always";
+  if (kind === "ephemeral") return "Never";
   const rp = pod.spec.restartPolicy ?? "Always";
   if (kind === "init") return rp === "Never" ? "Never" : "OnFailure";
   return rp;
@@ -124,7 +126,7 @@ function runProbe(cluster: Cluster, pod: KObject, c: ContainerSpec, cs: Containe
     const l = podListener(cluster, pod, port);
     if (!l) return { ok: false, message: `Get "${url}": dial tcp ${ip}:${port}: connect: connection refused` };
     if (scheme === "https") return { ok: false, message: `Get "${url}": http: server gave HTTP response to HTTPS client` };
-    const res = serveHttp(cluster, pod, l.container, l.cs, l.server, path, { ip: pod.status?.hostIP ?? "192.168.56.11", agent: "kube-probe/1.34" });
+    const res = serveHttp(cluster, pod, l.container, l.cs, l.server, path, { ip: pod.status?.hostIP ?? "192.168.56.11", agent: `kube-probe/${K8S_VERSION.slice(1).split(".").slice(0, 2).join(".")}` });
     if (!res) return { ok: false, message: `Get "${url}": read tcp ${pod.status?.hostIP ?? "192.168.56.11"}:52344->${ip}:${port}: read: connection reset by peer` };
     if (res.status >= 200 && res.status < 400) return { ok: true, message: "" };
     return { ok: false, message: `HTTP probe failed with statuscode: ${res.status}` };
@@ -545,6 +547,13 @@ export function runKubelet(cluster: Cluster, t: number): void {
       }
     }
 
+    // Ephemeral containers (kubectl debug) start as soon as they are added.
+    const ephemeral = (pod.spec.ephemeralContainers ?? []) as ContainerSpec[];
+    for (const ec of ephemeral) {
+      const cs = ensure(s, ec, Math.max(s.scheduledAt, t - 1000));
+      step(cluster, pod, ec, cs, s, t, 800, undefined, "ephemeral");
+    }
+
     const appSims = apps.map((c) => s.containers[c.name]);
     const sidecars = inits.filter((ic) => ic.restartPolicy === "Always");
     let phase = "Pending";
@@ -600,6 +609,7 @@ export function runKubelet(cluster: Cluster, t: number): void {
       startTime: isoTime(s.scheduledAt),
       ...(inits.length ? { initContainerStatuses: initStatuses } : {}),
       containerStatuses: statuses,
+      ...(ephemeral.length ? { ephemeralContainerStatuses: ephemeral.map((ec) => containerStatus(pod, ec, s.containers[ec.name], t, "ephemeral")) } : {}),
       qosClass: pod.status?.qosClass ?? "BestEffort",
     };
     pod.status = JSON.parse(JSON.stringify(pod.status));

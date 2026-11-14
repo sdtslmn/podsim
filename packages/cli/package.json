@@ -1,6 +1,6 @@
 {
   "name": "@podsim/cli",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Terminal Kubernetes training simulator.",
   "license": "Apache-2.0",
   "type": "module",
@@ -11,6 +11,6 @@
     "dist"
   ],
   "dependencies": {
-    "@podsim/core": "0.1.0"
+    "@podsim/core": "0.2.0"
   }
 }

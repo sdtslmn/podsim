@@ -10,7 +10,7 @@ import { isPodReady, deploymentPods, ownedBy } from "../controllers/deployment.j
 import type { Flags } from "./flags.js";
 import { type Ctx, out, err, nsOf, notFoundError, singleTarget, kindOrThrow, ref, parseTargets } from "./common.js";
 import { runInContainer } from "./container.js";
-import { canI, parseAs } from "./rbac.js";
+import { canI, parseAs, rulesFor } from "./rbac.js";
 import { toYaml } from "./printers.js";
 import { kustomize } from "./kustomize.js";
 
@@ -44,7 +44,7 @@ function pickContainer(ctx: Ctx, pod: KObject, name: string | undefined): Contai
   const cs = pod.spec.containers as ContainerSpec[];
   const inits = (pod.spec.initContainers ?? []) as ContainerSpec[];
   if (name) {
-    const c = cs.find((x) => x.name === name) ?? inits.find((x) => x.name === name);
+    const c = cs.find((x) => x.name === name) ?? inits.find((x) => x.name === name) ?? ((pod.spec.ephemeralContainers ?? []) as ContainerSpec[]).find((x) => x.name === name);
     if (!c) throw new KubeError(`error: container ${name} is not valid for pod ${pod.metadata.name}`);
     return c;
   }
@@ -310,7 +310,35 @@ export async function cmdAuth(ctx: Ctx, f: Flags): Promise<number> {
     return 0;
   }
   if (sub !== "can-i") throw new KubeError(`error: unknown command "${sub ?? ""}" for "kubectl auth"\nAvailable Commands: can-i, whoami`);
-  if (f.bool("list")) throw new KubeError("(podsim) auth can-i --list is not simulated yet. Ask about one verb and resource at a time.");
+  if (f.bool("list")) {
+    const ns = f.bool("all-namespaces") ? undefined : nsOf(ctx, f);
+    const id = parseAs(f.str("as"), f.all("as-group")) ?? { user: "kubernetes-admin", groups: ["kubeadm:cluster-admins", "system:authenticated"] };
+    const rows = new Map<string, { res: string; urls: string; names: string; verbs: Set<string> }>();
+    for (const r of rulesFor(ctx.cluster, id, ns)) {
+      if (r.nonResourceURLs?.length) {
+        for (const u of r.nonResourceURLs) {
+          const key = `|${u}`;
+          const row = rows.get(key) ?? { res: "", urls: `[${u}]`, names: "[]", verbs: new Set<string>() };
+          for (const v of r.verbs ?? []) row.verbs.add(v);
+          rows.set(key, row);
+        }
+        continue;
+      }
+      for (const g of r.apiGroups ?? [""]) {
+        for (const res of r.resources ?? []) {
+          const full = g === "" ? res : `${res}.${g}`;
+          const names = `[${(r.resourceNames ?? []).join(" ")}]`;
+          const key = `${full}|${names}`;
+          const row = rows.get(key) ?? { res: full, urls: "[]", names, verbs: new Set<string>() };
+          for (const v of r.verbs ?? []) row.verbs.add(v);
+          rows.set(key, row);
+        }
+      }
+    }
+    const list = [...rows.values()].sort((a, b) => (a.res === "" ? 1 : 0) - (b.res === "" ? 1 : 0) || a.res.localeCompare(b.res) || a.urls.localeCompare(b.urls));
+    out(ctx, table(["Resources", "Non-Resource URLs", "Resource Names", "Verbs"], list.map((r) => [r.res, r.urls, r.names, `[${[...r.verbs].join(" ")}]`])));
+    return 0;
+  }
   const [verb, resourceArg, maybeName] = rest;
   if (!verb || !resourceArg) throw new KubeError("error: you must specify two arguments: verb resource or a URL path");
   let resource = resourceArg;
@@ -424,19 +452,6 @@ export function cmdApiResources(ctx: Ctx, f: Flags): number {
     ),
   );
   return 0;
-}
-
-export function cmdTop(ctx: Ctx): number {
-  err(ctx, "error: Metrics API not available");
-  return 1;
-}
-
-export function cmdExplain(ctx: Ctx, f: Flags): number {
-  const what = f.args[0];
-  if (!what) throw new KubeError("error: You must specify the type of resource to explain. Use \"kubectl api-resources\" for a complete list of supported resources.");
-  const kind = kindOrThrow(what.split(".")[0]);
-  err(ctx, `(podsim) explain is not simulated yet. Field reference for ${kind.kind}: https://kubernetes.io/docs/reference/kubernetes-api/`);
-  return 1;
 }
 
 export async function cmdPortForward(ctx: Ctx, f: Flags): Promise<number> {

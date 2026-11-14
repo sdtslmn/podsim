@@ -580,6 +580,11 @@ export async function cmdPatch(ctx: Ctx, f: Flags): Promise<number> {
     const idx = args.findIndex((a) => /^\s*[{[]/.test(a) || a.includes(":"));
     if (idx >= 0) patchText = args.splice(idx, 1)[0];
   }
+  const patchFile = f.str("patch-file");
+  if (!patchText && patchFile) {
+    if (!ctx.fs.exists(patchFile)) throw new KubeError(`error: unable to read patch file: open ${patchFile}: no such file or directory`);
+    patchText = ctx.fs.readFile(patchFile);
+  }
   if (!patchText) throw new KubeError("error: must specify --patch or --patch-file containing the contents of the patch");
   const targets = parseTargets(args);
   if (targets.length !== 1 || targets[0].names.length !== 1) throw new KubeError("error: resource(s) were provided, but no name was specified");

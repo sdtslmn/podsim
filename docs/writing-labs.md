@@ -149,3 +149,31 @@ npm run validate-labs
 ```
 
 This runs every lab's setup, confirms the checks fail at the start, runs the solution, and confirms every check passes. `npm test` runs the same thing as part of the test suite.
+
+## Mock exams
+
+A mock exam is one YAML file in `exams/`. It is a list of tasks, each a small lab without hints: the learner works through them under a timer and everything is scored at the end.
+
+```yaml
+id: ckad-mock-2
+title: CKAD mock exam 2
+track: ckad
+minutes: 120
+passPercent: 66
+intro: |
+  Shown before the exam starts.
+tasks:
+  - host: ckad00031          # unique per task; the learner connects with ssh ckad00031
+    weight: 6                # percent of the total score; weights should add up to 100
+    domain: Services and Networking
+    title: Short title for the task list
+    text: |
+      The task as the learner reads it. Name every object, namespace and value
+      the checks look for.
+    setup: []                # same as labs
+    files: {}                # same as labs, placed in the home folder of that host
+    checks: []               # same as labs; each passed check earns weight / number of checks
+    solution: []             # shown with the results, and run by the validator
+```
+
+Every task runs on its own simulated cluster, so tasks cannot interfere with each other. `npm run validate-labs` checks exam tasks the same way as labs: unsolved after setup, solved by the solution.

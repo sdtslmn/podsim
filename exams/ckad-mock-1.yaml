@@ -1,0 +1,785 @@
+id: ckad-mock-1
+title: CKAD mock exam 1
+track: ckad
+minutes: 120
+passPercent: 66
+intro: |
+  16 tasks, 120 minutes, 66% to pass. Each task names the host to work on:
+  connect with ssh HOST, solve the task there, then type exit to return to
+  the base node before moving on. Tasks are weighted; partial credit is
+  given per check. The questions are original practice material written for
+  PodSim, mapped to the public CKAD curriculum.
+tasks:
+  - host: ckad00011
+    weight: 6
+    domain: Application Design and Build
+    title: CronJob with a concurrency policy
+    text: |
+      In the namespace `maint`, create a CronJob named `log-cleaner` that runs
+      every 6 hours at minute 0, with the image `busybox:1.36` and the command
+      `sh -c 'echo cleaning old logs'`.
+
+      A new run must never start while the previous one is still running, a
+      run that could not start within 60 seconds of its schedule is skipped,
+      and finished Jobs are deleted 120 seconds after they finish.
+    setup:
+      - kubectl create namespace maint
+    checks:
+      - name: The schedule is every 6 hours at minute 0
+        kind: CronJob
+        namespace: maint
+        resource: log-cleaner
+        path: .spec.schedule
+        matches: "^0 (\\*/6|0,6,12,18) \\* \\* \\*$"
+      - name: concurrencyPolicy is Forbid
+        kind: CronJob
+        namespace: maint
+        resource: log-cleaner
+        path: .spec.concurrencyPolicy
+        equals: Forbid
+      - name: startingDeadlineSeconds is 60
+        kind: CronJob
+        namespace: maint
+        resource: log-cleaner
+        path: .spec.startingDeadlineSeconds
+        equals: 60
+      - name: Jobs are deleted 120 seconds after finishing
+        kind: CronJob
+        namespace: maint
+        resource: log-cleaner
+        path: .spec.jobTemplate.spec.ttlSecondsAfterFinished
+        equals: 120
+      - name: The container runs busybox:1.36
+        kind: CronJob
+        namespace: maint
+        resource: log-cleaner
+        path: .spec.jobTemplate.spec.template.spec.containers[0].image
+        equals: busybox:1.36
+    solution:
+      - |
+        cat <<EOF | kubectl apply -f -
+        apiVersion: batch/v1
+        kind: CronJob
+        metadata:
+          name: log-cleaner
+          namespace: maint
+        spec:
+          schedule: "0 */6 * * *"
+          concurrencyPolicy: Forbid
+          startingDeadlineSeconds: 60
+          jobTemplate:
+            spec:
+              ttlSecondsAfterFinished: 120
+              template:
+                spec:
+                  restartPolicy: OnFailure
+                  containers:
+                  - name: log-cleaner
+                    image: busybox:1.36
+                    command: ["sh", "-c", "echo cleaning old logs"]
+        EOF
+
+  - host: ckad00012
+    weight: 7
+    domain: Application Design and Build
+    title: Two containers sharing a volume
+    text: |
+      Create a Deployment named `report` with 1 replica in the namespace
+      `default`. Its Pods have two containers that share an `emptyDir` volume
+      named `out`:
+
+      - `generator` (image `busybox:1.36`) runs
+        `sh -c 'while true; do date > /out/report.txt; sleep 10; done'`
+        with the volume at `/out`
+      - `server` (image `nginx:1.29`) mounts the volume at
+        `/usr/share/nginx/html`
+    checks:
+      - name: report has a container named generator
+        kind: Deployment
+        resource: report
+        path: .spec.template.spec.containers[*].name
+        contains: generator
+      - name: report has a container named server
+        kind: Deployment
+        resource: report
+        path: .spec.template.spec.containers[*].name
+        contains: server
+      - name: Deployment report is available
+        kind: Deployment
+        resource: report
+        path: .status.availableReplicas
+        equals: 1
+      - name: nginx sees the generated file
+        command: kubectl exec deploy/report -c server -- ls /usr/share/nginx/html
+        outputMatches: report.txt
+    solution:
+      - |
+        cat <<EOF | kubectl apply -f -
+        apiVersion: apps/v1
+        kind: Deployment
+        metadata:
+          name: report
+        spec:
+          replicas: 1
+          selector:
+            matchLabels:
+              app: report
+          template:
+            metadata:
+              labels:
+                app: report
+            spec:
+              volumes:
+              - name: out
+                emptyDir: {}
+              containers:
+              - name: generator
+                image: busybox:1.36
+                command: ["sh", "-c", "while true; do date > /out/report.txt; sleep 10; done"]
+                volumeMounts:
+                - name: out
+                  mountPath: /out
+              - name: server
+                image: nginx:1.29
+                volumeMounts:
+                - name: out
+                  mountPath: /usr/share/nginx/html
+        EOF
+      - sleep 15
+
+  - host: ckad00013
+    weight: 7
+    domain: Application Design and Build
+    title: Build an image and roll it out
+    text: |
+      The folder `notes/` contains a `Dockerfile` for a new version of the
+      notes app. Build it with the tag `registry.local:5000/notes:2.1` and
+      push it to the registry `registry.local:5000`.
+
+      Then update the existing Deployment `notes` (container `notes`) to use
+      the new image and make sure the rollout completes.
+    files:
+      notes/Dockerfile: |
+        FROM nginx:1.29
+        COPY index.html /usr/share/nginx/html/index.html
+      notes/index.html: |
+        notes app version 2.1
+    setup:
+      - kubectl create deployment notes --image=nginx:1.27 --replicas=2
+    checks:
+      - name: The Deployment uses registry.local:5000/notes:2.1
+        kind: Deployment
+        resource: notes
+        path: .spec.template.spec.containers[0].image
+        equals: registry.local:5000/notes:2.1
+      - name: All replicas run the new version
+        kind: Deployment
+        resource: notes
+        path: .status.updatedReplicas
+        equals: 2
+      - name: The new Pods serve version 2.1
+        command: kubectl exec deploy/notes -- cat /usr/share/nginx/html/index.html
+        outputMatches: version 2.1
+    solution:
+      - docker build -t registry.local:5000/notes:2.1 notes
+      - docker push registry.local:5000/notes:2.1
+      - kubectl set image deployment/notes nginx=registry.local:5000/notes:2.1
+      - kubectl rollout status deployment/notes --timeout=120s
+
+  - host: ckad00014
+    weight: 6
+    domain: Application Deployment
+    title: Roll back a failed update
+    text: |
+      The Deployment `frontend` was just updated and the new Pods do not
+      start. Roll it back to the previous working revision, then scale it to
+      3 replicas.
+    setup:
+      - kubectl create deployment frontend --image=nginx:1.27 --replicas=2
+      - sleep 10
+      - kubectl set image deployment/frontend nginx=nginx:1.27-alpinne
+    checks:
+      - name: frontend runs nginx:1.27 again
+        kind: Deployment
+        resource: frontend
+        path: .spec.template.spec.containers[0].image
+        equals: nginx:1.27
+      - name: frontend has 3 ready replicas
+        kind: Deployment
+        resource: frontend
+        path: .status.readyReplicas
+        equals: 3
+    solution:
+      - kubectl rollout undo deployment/frontend
+      - kubectl scale deployment frontend --replicas=3
+      - kubectl rollout status deployment/frontend --timeout=120s
+
+  - host: ckad00015
+    weight: 7
+    domain: Application Deployment
+    title: Replace a Helm release
+    text: |
+      The Helm repository `bitnami` is already configured. In the namespace
+      `web`:
+
+      - uninstall the release `old-site`
+      - install the chart `bitnami/apache` as the release `site` with 2
+        replicas (value `replicaCount`)
+    setup:
+      - helm repo add bitnami https://charts.bitnami.com/bitnami
+      - helm install old-site bitnami/nginx -n web --create-namespace
+    checks:
+      - name: old-site is uninstalled
+        command: helm status old-site -n web
+        exitCode: 1
+      - name: Release site is deployed
+        command: helm ls -n web
+        outputMatches: "site\\s+web\\s+1\\s+.*deployed\\s+apache"
+      - name: The apache Deployment has 2 ready replicas
+        kind: Deployment
+        namespace: web
+        resource: site-apache
+        path: .status.readyReplicas
+        equals: 2
+    solution:
+      - helm uninstall old-site -n web
+      - helm install site bitnami/apache -n web --set replicaCount=2
+      - sleep 20
+
+  - host: ckad00016
+    weight: 7
+    domain: Application Deployment
+    title: Production overlay with a generated ConfigMap
+    text: |
+      The folder `app/base` holds a Kustomize base. Create an overlay in
+      `app/overlays/prod` that:
+
+      - adds the label `env: prod` to every resource and to the Pod selector
+      - generates a ConfigMap named `app-settings` with the literal
+        `MODE=prod`, replacing the reference in the Deployment
+      - sets the namespace `prod`
+
+      Apply the overlay. The namespace `prod` exists.
+    files:
+      app/base/kustomization.yaml: |
+        resources:
+        - deployment.yaml
+        configMapGenerator:
+        - name: app-settings
+          literals:
+          - MODE=dev
+      app/base/deployment.yaml: |
+        apiVersion: apps/v1
+        kind: Deployment
+        metadata:
+          name: app
+        spec:
+          replicas: 1
+          selector:
+            matchLabels:
+              app: app
+          template:
+            metadata:
+              labels:
+                app: app
+            spec:
+              containers:
+              - name: app
+                image: busybox:1.36
+                command: ["sh", "-c", "echo mode=$MODE; sleep 3600"]
+                envFrom:
+                - configMapRef:
+                    name: app-settings
+    setup:
+      - kubectl create namespace prod
+    checks:
+      - name: Deployment app in prod carries env=prod
+        kind: Deployment
+        namespace: prod
+        resource: app
+        path: .spec.selector.matchLabels.env
+        equals: prod
+      - name: The app runs in prod mode
+        command: kubectl logs deploy/app -n prod
+        outputMatches: mode=prod
+      - name: The generated ConfigMap has a hash suffix
+        command: kubectl get cm -n prod -o name
+        outputMatches: "configmap/app-settings-[a-z0-9]{10}"
+    solution:
+      - |
+        mkdir -p app/overlays/prod
+        cat <<EOF > app/overlays/prod/kustomization.yaml
+        resources:
+        - ../../base
+        namespace: prod
+        commonLabels:
+          env: prod
+        configMapGenerator:
+        - name: app-settings
+          behavior: replace
+          literals:
+          - MODE=prod
+        EOF
+      - kubectl apply -k app/overlays/prod
+      - sleep 15
+
+  - host: ckad00017
+    weight: 5
+    domain: Application Observability and Maintenance
+    title: Extract errors from logs
+    text: |
+      The Pod `ingest` in the namespace `obs` logs a mix of INFO and ERROR
+      lines. Write every ERROR line of its log, and nothing else, to the file
+      `errors.txt` in your home folder.
+    setup:
+      - kubectl create namespace obs
+      - kubectl run ingest -n obs --image=busybox:1.36 -- sh -c 'echo "INFO started"; echo "ERROR disk quota exceeded on /data"; echo "INFO batch 1 done"; echo "ERROR upstream timeout after 30s"; sleep 3600'
+    checks:
+      - name: errors.txt has both ERROR lines
+        command: grep -c ERROR errors.txt
+        outputMatches: "^2"
+      - name: errors.txt has no INFO lines
+        command: grep -c INFO errors.txt
+        outputMatches: "^0"
+    solution:
+      - kubectl logs ingest -n obs | grep ERROR > errors.txt
+
+  - host: ckad00018
+    weight: 5
+    domain: Application Observability and Maintenance
+    title: Startup and liveness probes
+    text: |
+      The app in the Deployment `slow-api` takes a long time to start. Add a
+      startup probe to its container that sends an HTTP GET to `/` on port 80
+      every 10 seconds and allows up to 30 failures. Add a liveness probe
+      that sends an HTTP GET to `/` on port 80.
+    setup:
+      - kubectl create deployment slow-api --image=nginx:1.29 --port=80
+    checks:
+      - name: The startup probe allows 30 failures
+        kind: Deployment
+        resource: slow-api
+        path: .spec.template.spec.containers[0].startupProbe.failureThreshold
+        equals: 30
+      - name: The startup probe runs every 10 seconds
+        kind: Deployment
+        resource: slow-api
+        path: .spec.template.spec.containers[0].startupProbe.periodSeconds
+        equals: 10
+      - name: The liveness probe is an HTTP GET on /
+        kind: Deployment
+        resource: slow-api
+        path: .spec.template.spec.containers[0].livenessProbe.httpGet.path
+        equals: /
+      - name: slow-api is available
+        kind: Deployment
+        resource: slow-api
+        path: .status.updatedReplicas
+        equals: 1
+    solution:
+      - |
+        cat <<EOF > probes.yaml
+        spec:
+          template:
+            spec:
+              containers:
+              - name: nginx
+                startupProbe:
+                  httpGet:
+                    path: /
+                    port: 80
+                  periodSeconds: 10
+                  failureThreshold: 30
+                livenessProbe:
+                  httpGet:
+                    path: /
+                    port: 80
+        EOF
+      - kubectl patch deployment slow-api --patch-file probes.yaml
+      - kubectl rollout status deployment/slow-api --timeout=120s
+
+  - host: ckad00019
+    weight: 5
+    domain: Application Observability and Maintenance
+    title: Fix manifests that use removed APIs
+    text: |
+      `legacy.yaml` in your home folder no longer applies to this cluster.
+      Update it to current API versions, keeping the objects' names and
+      settings, and apply it.
+    files:
+      legacy.yaml: |
+        apiVersion: batch/v1beta1
+        kind: CronJob
+        metadata:
+          name: nightly-report
+        spec:
+          schedule: "30 1 * * *"
+          jobTemplate:
+            spec:
+              template:
+                spec:
+                  restartPolicy: OnFailure
+                  containers:
+                  - name: report
+                    image: busybox:1.36
+                    command: ["sh", "-c", "echo report"]
+        ---
+        apiVersion: policy/v1beta1
+        kind: PodDisruptionBudget
+        metadata:
+          name: web-pdb
+        spec:
+          minAvailable: 1
+          selector:
+            matchLabels:
+              app: web
+    checks:
+      - name: CronJob nightly-report exists
+        kind: CronJob
+        resource: nightly-report
+        path: .spec.schedule
+        equals: 30 1 * * *
+      - name: PodDisruptionBudget web-pdb exists
+        kind: PodDisruptionBudget
+        resource: web-pdb
+        path: .spec.minAvailable
+        equals: 1
+    solution:
+      - sed -i 's|batch/v1beta1|batch/v1|; s|policy/v1beta1|policy/v1|' legacy.yaml
+      - kubectl apply -f legacy.yaml
+
+  - host: ckad00020
+    weight: 6
+    domain: Application Environment, Configuration and Security
+    title: Secret from a file as an environment variable
+    text: |
+      Create a generic Secret named `api-token` from the file `token.txt` in
+      your home folder, using the key `token`.
+
+      Then create a Pod named `client` (image `busybox:1.36`, command
+      `sleep 3600`) with the environment variable `API_TOKEN` taken from that
+      key.
+    files:
+      token.txt: tk-4f9a2c1e
+    checks:
+      - name: Secret api-token has the key token
+        kind: Secret
+        resource: api-token
+        path: .data.token
+        equals: dGstNGY5YTJjMWU=
+      - name: API_TOKEN comes from the Secret
+        kind: Pod
+        resource: client
+        path: .spec.containers[0].env[0].valueFrom.secretKeyRef.name
+        equals: api-token
+      - name: The Pod sees the token
+        command: kubectl exec client -- printenv API_TOKEN
+        outputMatches: "^tk-4f9a2c1e"
+    solution:
+      - kubectl create secret generic api-token --from-file=token=token.txt
+      - |
+        cat <<EOF | kubectl apply -f -
+        apiVersion: v1
+        kind: Pod
+        metadata:
+          name: client
+        spec:
+          containers:
+          - name: client
+            image: busybox:1.36
+            command: ["sleep", "3600"]
+            env:
+            - name: API_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: api-token
+                  key: token
+        EOF
+      - sleep 10
+
+  - host: ckad00021
+    weight: 6
+    domain: Application Environment, Configuration and Security
+    title: Least-privilege access to Deployments
+    text: |
+      The tool running in the namespace `audit` needs to read Deployments in
+      that namespace, and nothing more.
+
+      Create a ServiceAccount `inspector`, a Role `deploy-viewer` that allows
+      get, list and watch on deployments, and a RoleBinding
+      `inspector-deploy-viewer`. Then run a Pod named `inspector` (image
+      `busybox:1.36`, command `sleep 3600`) in `audit` as that ServiceAccount.
+    setup:
+      - kubectl create namespace audit
+    checks:
+      - name: inspector can list deployments in audit
+        command: kubectl auth can-i list deployments.apps -n audit --as=system:serviceaccount:audit:inspector
+        outputMatches: "^yes"
+      - name: inspector cannot list secrets
+        command: kubectl auth can-i list secrets -n audit --as=system:serviceaccount:audit:inspector
+        outputMatches: "^no"
+      - name: Pod inspector runs as the ServiceAccount
+        kind: Pod
+        namespace: audit
+        resource: inspector
+        path: .spec.serviceAccountName
+        equals: inspector
+    solution:
+      - kubectl create serviceaccount inspector -n audit
+      - kubectl create role deploy-viewer -n audit --verb=get,list,watch --resource=deployments
+      - kubectl create rolebinding inspector-deploy-viewer -n audit --role=deploy-viewer --serviceaccount=audit:inspector
+      - "kubectl run inspector -n audit --image=busybox:1.36 --overrides='{\"spec\":{\"serviceAccountName\":\"inspector\"}}' -- sleep 3600"
+
+  - host: ckad00022
+    weight: 6
+    domain: Application Environment, Configuration and Security
+    title: Run nginx as a non-root user
+    text: |
+      Change the Deployment `hardened` so that its Pods run as a non-root
+      user: set `runAsNonRoot: true` and `runAsUser: 101` at the Pod level,
+      forbid privilege escalation in the container, and drop all
+      capabilities. The image already supports running unprivileged on port
+      8080. Make sure the Deployment becomes available.
+    setup:
+      - kubectl create deployment hardened --image=nginxinc/nginx-unprivileged:1.29 --port=8080
+    checks:
+      - name: runAsNonRoot is true
+        kind: Deployment
+        resource: hardened
+        path: .spec.template.spec.securityContext.runAsNonRoot
+        equals: true
+      - name: runAsUser is 101
+        kind: Deployment
+        resource: hardened
+        path: .spec.template.spec.securityContext.runAsUser
+        equals: 101
+      - name: Privilege escalation is forbidden
+        kind: Deployment
+        resource: hardened
+        path: .spec.template.spec.containers[0].securityContext.allowPrivilegeEscalation
+        equals: false
+      - name: All capabilities are dropped
+        kind: Deployment
+        resource: hardened
+        path: .spec.template.spec.containers[0].securityContext.capabilities.drop
+        contains: ALL
+      - name: hardened is available
+        kind: Deployment
+        resource: hardened
+        path: .status.availableReplicas
+        equals: 1
+    solution:
+      - "kubectl patch deployment hardened -p '{\"spec\":{\"template\":{\"spec\":{\"securityContext\":{\"runAsNonRoot\":true,\"runAsUser\":101},\"containers\":[{\"name\":\"nginx-unprivileged\",\"securityContext\":{\"allowPrivilegeEscalation\":false,\"capabilities\":{\"drop\":[\"ALL\"]}}}]}}}}'"
+      - kubectl rollout status deployment/hardened --timeout=120s
+
+  - host: ckad00023
+    weight: 7
+    domain: Application Environment, Configuration and Security
+    title: Default resources with a LimitRange
+    text: |
+      In the namespace `limited`, create a LimitRange named `defaults` so
+      that containers without resources get a default request of 100m CPU
+      and 128Mi memory and a default limit of 500m CPU and 256Mi memory.
+
+      Then create a Pod named `auto` (image `nginx:1.29`) in `limited`
+      without any resources and check that it received the defaults.
+    setup:
+      - kubectl create namespace limited
+    checks:
+      - name: LimitRange defaults sets a 500m CPU limit
+        kind: LimitRange
+        namespace: limited
+        resource: defaults
+        path: .spec.limits[0].default.cpu
+        equals: 500m
+      - name: LimitRange defaults sets a 128Mi memory request
+        kind: LimitRange
+        namespace: limited
+        resource: defaults
+        path: .spec.limits[0].defaultRequest.memory
+        equals: 128Mi
+      - name: Pod auto got a 256Mi memory limit
+        kind: Pod
+        namespace: limited
+        resource: auto
+        path: .spec.containers[0].resources.limits.memory
+        equals: 256Mi
+      - name: Pod auto got a 100m CPU request
+        kind: Pod
+        namespace: limited
+        resource: auto
+        path: .spec.containers[0].resources.requests.cpu
+        equals: 100m
+    solution:
+      - |
+        cat <<EOF | kubectl apply -f -
+        apiVersion: v1
+        kind: LimitRange
+        metadata:
+          name: defaults
+          namespace: limited
+        spec:
+          limits:
+          - type: Container
+            default:
+              cpu: 500m
+              memory: 256Mi
+            defaultRequest:
+              cpu: 100m
+              memory: 128Mi
+        EOF
+      - kubectl run auto -n limited --image=nginx:1.29
+
+  - host: ckad00024
+    weight: 7
+    domain: Services and Networking
+    title: Open a path through a default-deny policy
+    text: |
+      The namespace `secure` has a NetworkPolicy `default-deny` that blocks
+      all incoming traffic. The Pod `web` (label `app=web`) serves HTTP on
+      port 80 behind the Service `web`.
+
+      Create a NetworkPolicy named `allow-client-web` that lets Pods with the
+      label `role=client` reach `web` on TCP port 80. Do not change or delete
+      `default-deny`.
+    setup:
+      - kubectl create namespace secure
+      - kubectl run web -n secure --image=nginx:1.29 -l app=web --port=80 --expose
+      - kubectl run client -n secure --image=busybox:1.36 -l role=client -- sleep 3600
+      - kubectl run other -n secure --image=busybox:1.36 -l role=other -- sleep 3600
+      - |
+        cat <<EOF | kubectl apply -f -
+        apiVersion: networking.k8s.io/v1
+        kind: NetworkPolicy
+        metadata:
+          name: default-deny
+          namespace: secure
+        spec:
+          podSelector: {}
+          policyTypes: ["Ingress"]
+        EOF
+    checks:
+      - name: default-deny is unchanged
+        kind: NetworkPolicy
+        namespace: secure
+        resource: default-deny
+        path: .spec.policyTypes[0]
+        equals: Ingress
+      - name: client reaches web
+        command: kubectl exec -n secure client -- wget -qO- -T 2 http://web
+        outputMatches: Welcome to nginx
+      - name: other is still blocked
+        command: kubectl exec -n secure other -- wget -qO- -T 2 http://web
+        exitCode: 1
+    solution:
+      - |
+        cat <<EOF | kubectl apply -f -
+        apiVersion: networking.k8s.io/v1
+        kind: NetworkPolicy
+        metadata:
+          name: allow-client-web
+          namespace: secure
+        spec:
+          podSelector:
+            matchLabels:
+              app: web
+          policyTypes: ["Ingress"]
+          ingress:
+          - from:
+            - podSelector:
+                matchLabels:
+                  role: client
+            ports:
+            - protocol: TCP
+              port: 80
+        EOF
+
+  - host: ckad00025
+    weight: 7
+    domain: Services and Networking
+    title: Version routing with an Ingress
+    text: |
+      Two versions of the docs site run behind the Services `docs-v1` and
+      `docs-v2` (both on port 80). Create an Ingress named `docs` with the
+      class `nginx` for the host `docs.local`: requests under `/v1` go to
+      `docs-v1` and requests under `/v2` go to `docs-v2` (pathType Prefix).
+
+      The ingress controller listens on NodePort 30080 of every node.
+    setup:
+      - kubectl create deployment docs-v1 --image=hashicorp/http-echo:1.0 -- /http-echo -text=docs-v1 -listen=:5678
+      - kubectl expose deployment docs-v1 --port=80 --target-port=5678
+      - kubectl create deployment docs-v2 --image=hashicorp/http-echo:1.0 -- /http-echo -text=docs-v2 -listen=:5678
+      - kubectl expose deployment docs-v2 --port=80 --target-port=5678
+    checks:
+      - name: Ingress docs uses the class nginx
+        kind: Ingress
+        resource: docs
+        path: .spec.ingressClassName
+        equals: nginx
+      - name: /v1 reaches docs-v1
+        command: "curl -s -H 'Host: docs.local' http://node01:30080/v1/intro"
+        outputMatches: "^docs-v1"
+      - name: /v2 reaches docs-v2
+        command: "curl -s -H 'Host: docs.local' http://node01:30080/v2"
+        outputMatches: "^docs-v2"
+    solution:
+      - kubectl create ingress docs --class=nginx --rule='docs.local/v1*=docs-v1:80' --rule='docs.local/v2*=docs-v2:80'
+      - sleep 10
+
+  - host: ckad00026
+    weight: 6
+    domain: Services and Networking
+    title: Service with a named target port
+    text: |
+      The Deployment `ledger` exposes its container port under the name
+      `http`. Create a ClusterIP Service named `ledger` on port 80 that
+      forwards to the named port `http`, so that `http://ledger` works from
+      other Pods in the namespace.
+    setup:
+      - |
+        cat <<EOF | kubectl apply -f -
+        apiVersion: apps/v1
+        kind: Deployment
+        metadata:
+          name: ledger
+        spec:
+          replicas: 2
+          selector:
+            matchLabels:
+              app: ledger
+          template:
+            metadata:
+              labels:
+                app: ledger
+            spec:
+              containers:
+              - name: ledger
+                image: hashicorp/http-echo:1.0
+                args: ["-text=ledger balance ok", "-listen=:9090"]
+                ports:
+                - name: http
+                  containerPort: 9090
+        EOF
+    checks:
+      - name: Service ledger targets the port named http
+        kind: Service
+        resource: ledger
+        path: .spec.ports[0].targetPort
+        equals: http
+      - name: http://ledger answers
+        command: kubectl run lab-check --rm -i --image=busybox:1.36 --restart=Never -- wget -qO- -T 2 http://ledger
+        outputMatches: ledger balance ok
+    solution:
+      - |
+        cat <<EOF | kubectl apply -f -
+        apiVersion: v1
+        kind: Service
+        metadata:
+          name: ledger
+        spec:
+          selector:
+            app: ledger
+          ports:
+          - port: 80
+            targetPort: http
+        EOF

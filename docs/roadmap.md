@@ -2,7 +2,7 @@
 
 The plan, roughly in order. Open an issue if you want to work on something or think the order is wrong.
 
-## v0.1 (this release)
+## v0.1
 
 - Simulated cluster engine with scheduler, kubelet, Deployment, ReplicaSet, Endpoints and garbage collection
 - kubectl emulation for the everyday commands, with real output formats and error messages
@@ -10,31 +10,36 @@ The plan, roughly in order. Open an issue if you want to work on something or th
 - Terminal and browser front ends
 - 10 beginner labs, lab format, lab validator, CI and GitHub Pages deployment
 
-## v0.2: more labs and core workloads
+## v0.2: ready for the CKAD (this release)
 
-- Labs: Pending Pods (nodeSelector, taints), labels and selectors, Secrets, resource requests and limits, multi-container Pods, ConfigMaps as files, `kubectl explain`-free manifest writing
-- Jobs and CronJobs
-- Liveness and readiness probes, with Pods that fail them
-- `--watch` for `get pods` and `get events`
-- `kubectl explain` for the common resources
+- Containers run their commands in a shell interpreter, with image and volume filesystems, users and capabilities
+- Jobs, CronJobs, DaemonSets, StatefulSets, HorizontalPodAutoscalers and a simulated metrics-server
+- Init containers, native sidecars, liveness, readiness and startup probes, OOMKilled
+- ResourceQuota, LimitRange, securityContext, Pod Security Admission, ServiceAccount tokens, RBAC with `--as`
+- PersistentVolumes, StorageClasses and dynamic provisioning
+- NetworkPolicy enforcement, ingress-nginx, NodePorts from the host, port-forward
+- CRDs, Helm, Kustomize, docker and podman image builds, removed API versions
+- `kubectl explain`, `debug`, `events`, `top`, `autoscale`, `auth can-i --list`
+- 24 CKAD labs grouped by exam domain, and a timed mock exam with ssh hosts and automatic scoring
 
-## v0.3: CKA and CKAD tracks
+## v0.3: CKA track
 
-- DaemonSets and StatefulSets
-- NetworkPolicy enforcement in the simulated network (wget and curl respect policies)
-- Ingress with a simulated ingress controller
-- Intermediate labs grouped by exam domain
-- Exam mode: a timer, several tasks across namespaces, a score at the end
+- Several clusters and contexts in one kubeconfig
+- Node troubleshooting: kubelet and container runtime failures, `systemctl`, `journalctl`, `crictl`
+- Control plane: static Pods, etcd backup and restore, kubeadm upgrades
+- Gateway API
+- `--watch` for `get` and `events`
+- A CKA lab track and mock exam
 
 ## v0.4: security track
 
-- RBAC labs (Roles, ClusterRoles, ServiceAccounts, `auth can-i`)
-- Pod Security Admission levels and securityContext
-- Secrets handling and image hygiene
+- CKS topics: audit logs, AppArmor and seccomp profiles, image scanning, runtime security
+- Secrets encryption at rest, admission webhooks
 - Kubernetes at the industrial edge: segmented namespaces, NetworkPolicy zones and conduits, workload hardening
 
 ## Later
 
+- More mock exams, and a KCNA and KCSA question bank
 - Publish the CLI to npm so `npx podsim` works without cloning
 - Translations of the lab text
 - Instructor view: a class code and a progress board for a group of learners

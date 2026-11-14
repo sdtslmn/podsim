@@ -6,7 +6,7 @@ import type { Cluster } from "./cluster.js";
 import { fromBase64 } from "./cluster.js";
 import type { ContainerSpec, KObject } from "./types.js";
 import { parseImage, builtImage } from "./images.js";
-import { matchMap } from "./util.js";
+import { matchMap, fnv1a, parseCpu } from "./util.js";
 import { DIR, DELETED, normalizePath, Proc, execNow, formatDate, nginxPorts, setPortChecker, type Fs, type Host, type NetResult, type Server } from "./runtime.js";
 import { quoteArgv } from "./shparse.js";
 import { apiGet, identityFromToken } from "./apiserver.js";
@@ -383,8 +383,13 @@ export function imageInfo(image: string): ImageInfo | undefined {
         `echo "-------------------------------------------------------------------------------"; echo "NGINX Ingress controller"; echo "  Release:       v1.14.0"; echo "-------------------------------------------------------------------------------"; echo 'I1114 10:00:01.000000       7 main.go:205] "Creating API client" host="https://10.96.0.1:443"'; echo 'I1114 10:00:02.000000       7 nginx.go:273] "Starting NGINX Ingress controller"'; __serve ingress 80,443`,
     };
   }
+  if (p.registry === "registry.k8s.io" && p.repository === "metrics-server/metrics-server") {
+    const script = `echo 'I1114 10:00:01.000000       1 serving.go:380] Generated self-signed cert (/tmp/apiserver.crt, /tmp/apiserver.key)'; echo 'I1114 10:00:02.000000       1 handler.go:288] Adding GroupVersion metrics.k8s.io v1beta1 to ResourceManager'; echo 'I1114 10:00:02.000000       1 secure_serving.go:213] Serving securely on [::]:10250'; __serve tcp 10250`;
+    return { tools: BUSYBOX_TOOLS, user: 1000, memMi: 22, shell: false, entrypoint: ["sh", "-c", script, "--"] };
+  }
   if (p.registry === "registry.k8s.io" || p.registry === "k8s.gcr.io" || p.registry === "quay.io") {
-    return { tools: BUSYBOX_TOOLS, user: 0, memMi: 15, shell: false, defaultScript: () => "sleep infinity" };
+    // Binary images: arguments go to the program, which just keeps running.
+    return { tools: BUSYBOX_TOOLS, user: 0, memMi: 15, shell: false, entrypoint: ["sh", "-c", "sleep infinity", "--"] };
   }
   return IMAGES[p.repository];
 }
@@ -406,6 +411,39 @@ export function processFor(c: ContainerSpec, env: Record<string, string>): { arg
   }
   if (info?.defaultScript) return { script: info.defaultScript(c, env) };
   return { argv: [] };
+}
+
+/** The files a node's root filesystem shows through a hostPath volume (kubectl debug node). */
+function seedNodeFs(store: Store, node: string): void {
+  for (const d of ["/bin", "/boot", "/dev", "/home", "/lib", "/opt", "/proc", "/root", "/run", "/sbin", "/srv", "/sys", "/tmp", "/usr", "/usr/bin", "/var", "/var/log", "/var/log/pods", "/var/log/containers", "/var/lib", "/var/lib/kubelet", "/etc/kubernetes", "/etc/cni/net.d"]) store.set(d, DIR);
+  store.set("/etc/hostname", node + "\n");
+  store.set("/etc/os-release", 'PRETTY_NAME="Ubuntu 24.04.3 LTS"\nNAME="Ubuntu"\nVERSION_ID="24.04"\nID=ubuntu\n');
+  store.set("/etc/hosts", `127.0.0.1 localhost\n127.0.1.1 ${node}\n`);
+  store.set("/var/lib/kubelet/config.yaml", "apiVersion: kubelet.config.k8s.io/v1beta1\nkind: KubeletConfiguration\nauthentication:\n  anonymous:\n    enabled: false\n  webhook:\n    enabled: true\nauthorization:\n  mode: Webhook\ncgroupDriver: systemd\nclusterDNS:\n- 10.96.0.10\nclusterDomain: cluster.local\nstaticPodPath: /etc/kubernetes/manifests\n");
+  store.set("/etc/kubernetes/kubelet.conf", "apiVersion: v1\nkind: Config\nclusters:\n- cluster:\n    server: https://192.168.56.10:6443\n  name: kubernetes\n");
+  store.set("/etc/cni/net.d/10-calico.conflist", '{\n  "name": "k8s-pod-network",\n  "cniVersion": "0.3.1"\n}\n');
+  if (node === "controlplane") {
+    store.set("/etc/kubernetes/manifests", DIR);
+    for (const c of ["etcd", "kube-apiserver", "kube-controller-manager", "kube-scheduler"]) store.set(`/etc/kubernetes/manifests/${c}.yaml`, `apiVersion: v1\nkind: Pod\nmetadata:\n  name: ${c}\n  namespace: kube-system\n`);
+  }
+}
+
+/** CPU (in millicores) a running container would use, for kubectl top and HPAs. */
+export function cpuUsageMilli(c: ContainerSpec, seed: string): number {
+  const all = [...(c.command ?? []), ...(c.args ?? [])].join(" ");
+  const limit = parseCpuLimit(c);
+  const stress = all.match(/(?:--cpu|-c)\s+(\d+)/);
+  if (stress && /stress/.test(all + c.image)) return Math.min(parseInt(stress[1], 10) * 1000, limit ?? Infinity);
+  const busy = /while\s+(true|:)\s*;\s*do\s*(:|true)?\s*;?\s*done/.test(all) || /yes\s*>\s*\/dev\/null/.test(all);
+  if (busy) return Math.min(1000, limit ?? Infinity);
+  const load = (c.env ?? []).find((e: { name: string; value?: string }) => e.name === "PODSIM_CPU_MILLI")?.value;
+  if (load) return Math.min(parseInt(load, 10) || 0, limit ?? Infinity);
+  return 1 + (fnv1a(seed) % 3);
+}
+
+function parseCpuLimit(c: ContainerSpec): number | undefined {
+  const l = (c.resources as { limits?: Record<string, string> } | undefined)?.limits?.cpu;
+  return l === undefined ? undefined : parseCpu(l);
 }
 
 /** Memory (in MiB) a container would use, for OOM kills and kubectl top. */
@@ -728,14 +766,16 @@ export function containerFs(cluster: Cluster, pod: KObject, c: ContainerSpec, si
     else if (v.hostPath) {
       const node = pod.spec?.nodeName ?? "node";
       const all = persistentStore(cluster, `hostpath/${node}`);
+      if (!all.has("/etc/hostname")) seedNodeFs(all, node);
       const base = normalizePath(v.hostPath.path ?? "/");
+      const strip = (k: string) => (base === "/" ? k : k.slice(base.length) || "/");
       store = new Proxy(all, {
         get(target, prop) {
           if (prop === "get") return (k: string) => target.get(normalizePath(base + k));
           if (prop === "set") return (k: string, val: string) => target.set(normalizePath(base + k), val);
           if (prop === "delete") return (k: string) => target.delete(normalizePath(base + k));
-          if (prop === "keys") return () => [...target.keys()].filter((k) => k.startsWith(base)).map((k) => k.slice(base.length) || "/")[Symbol.iterator]();
-          if (prop === "entries") return () => [...target.entries()].filter(([k]) => k.startsWith(base)).map(([k, val]) => [k.slice(base.length) || "/", val])[Symbol.iterator]();
+          if (prop === "keys") return () => [...target.keys()].filter((k) => base === "/" || k === base || k.startsWith(base + "/")).map(strip)[Symbol.iterator]();
+          if (prop === "entries") return () => [...target.entries()].filter(([k]) => base === "/" || k === base || k.startsWith(base + "/")).map(([k, val]) => [strip(k), val])[Symbol.iterator]();
           const value = Reflect.get(target, prop);
           return typeof value === "function" ? value.bind(target) : value;
         },

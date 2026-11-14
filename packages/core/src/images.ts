@@ -18,7 +18,44 @@ export type Behavior =
   | { type: "pullError"; message: string };
 
 const TAG_RE =
-  /^(latest|stable|mainline|alpine|slim|perl|bookworm|bullseye|jammy|noble|lts|\d+(\.\d+){0,2}(-(alpine|slim|perl|bookworm|bullseye|jammy|noble|otel)[0-9.]*)?)$/;
+  /^(latest|stable|mainline|alpine|slim|perl|bookworm|bullseye|jammy|noble|lts|v?\d+(\.\d+){0,2}(-(alpine|slim|perl|bookworm|bullseye|jammy|noble|otel)[0-9.]*)?(-debian-\d+-r\d+)?)$/;
+
+/** An image built with docker or podman on the simulator host. */
+export interface BuiltImage {
+  base: string;
+  files: Record<string, string>;
+  cmd: string[];
+  entrypoint: string[];
+  env: Record<string, string>;
+  workdir: string;
+  user?: number;
+  exposed: string[];
+  created: number;
+  id: string;
+  size: number;
+}
+
+let activeRegistry: Map<string, BuiltImage> | undefined;
+
+/** Images pushed to the simulated registries of the active cluster. */
+export function useRegistry(r: Map<string, BuiltImage> | undefined): void {
+  activeRegistry = r;
+}
+
+/** A canonical reference: registry/repository:tag. */
+export function imageKey(ref: string, tool: "docker" | "podman" = "docker"): string {
+  const p = parseImage(ref);
+  const first = ref.split("/")[0];
+  const hasRegistry = ref.includes("/") && (first.includes(".") || first.includes(":") || first === "localhost");
+  const reg = hasRegistry ? p.registry : tool === "podman" ? "localhost" : "docker.io";
+  const repo = reg === "docker.io" && !p.repository.includes("/") ? `library/${p.repository}` : p.repository;
+  return `${reg}/${repo}:${p.tag}`;
+}
+
+/** The pushed image a pod refers to, if any. */
+export function builtImage(ref: string): BuiltImage | undefined {
+  return activeRegistry?.get(imageKey(ref));
+}
 
 export function parseImage(image: string): ParsedImage {
   let rest = image.trim();
@@ -126,6 +163,9 @@ const SERVER_IMAGES: Record<string, ServerImage> = {
   },
   rabbitmq: { logs: () => ["Server startup complete; 0 plugins started."] },
   "traefik/whoami": { logs: () => ["Starting up on port 80"] },
+  "bitnami/nginx": { logs: nginxLogs },
+  "bitnami/apache": { logs: () => [] },
+  "bitnami/redis": { logs: () => [] },
   "hashicorp/http-echo": { logs: () => ["[INFO] server is listening on :5678"] },
 };
 
@@ -184,6 +224,7 @@ export function containerBehavior(c: ContainerSpec, env: Record<string, string>)
   const tagOk = !!p.digest || TAG_RE.test(p.tag);
 
   if (isSystemImage(p)) return { type: "server", logs: () => [] };
+  if (builtImage(c.image)) return { type: "server", logs: () => [] };
 
   const repo = p.repository;
   const server = SERVER_IMAGES[repo];

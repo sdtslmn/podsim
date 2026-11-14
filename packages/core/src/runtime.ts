@@ -962,7 +962,7 @@ function* startNginx(x: Exec, args: string[], io: IO): G {
     io.err("nginx: the configuration file /etc/nginx/nginx.conf syntax is ok\nnginx: configuration file /etc/nginx/nginx.conf test is successful\n");
     return 0;
   }
-  if (x.host.uid !== 0 && x.host.fs.write("/var/cache/nginx/client_temp/.probe", "", false)) {
+  if (x.host.uid !== 0 && x.host.fs.mkdir("/var/cache/nginx/client_temp", true)) {
     io.err(`nginx: [warn] the "user" directive makes sense only if the master process runs with super-user privileges, ignored in /etc/nginx/nginx.conf:2\n`);
     io.err(`nginx: [emerg] mkdir() "/var/cache/nginx/client_temp" failed (13: Permission denied)\n`);
     return 1;

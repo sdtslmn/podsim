@@ -7,6 +7,8 @@ import type { FileSystem } from "./fs.js";
 import type { Cluster } from "./cluster.js";
 import { execInContainer, identityFor, hostNet } from "./podruntime.js";
 import { parseImage } from "./images.js";
+import { helm } from "./helm/index.js";
+import { containerTool } from "./containertool.js";
 import { Kubectl, type IO } from "./kubectl/index.js";
 import { toBase64, fromBase64 } from "./cluster.js";
 
@@ -724,8 +726,6 @@ export class Shell {
         return 1;
       case "jq":
       case "yq":
-      case "helm":
-      case "docker":
       case "crictl":
       case "systemctl":
       case "journalctl":
@@ -734,6 +734,12 @@ export class Shell {
       case "ssh":
         io.stderr(`(podsim) ${cmd} is not available on the simulator host yet. It is on the roadmap.\n`);
         return 127;
+      case "helm":
+        return helm(this.cluster, this.fs, this.kubectl.state.namespace, args, { stdout: out, stderr: (t) => io.stderr(t) });
+      case "docker":
+      case "podman":
+        this.cluster.advance();
+        return containerTool(this.cluster, this.fs, cmd, args, { stdout: out, stderr: (t) => io.stderr(t) });
       case "curl":
       case "wget": {
         this.cluster.advance();

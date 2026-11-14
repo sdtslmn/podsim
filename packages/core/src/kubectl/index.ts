@@ -25,6 +25,7 @@ import {
   cmdExplain,
   cmdEdit,
   cmdPortForward,
+  cmdKustomize,
   notSimulated,
 } from "./ops.js";
 
@@ -87,6 +88,7 @@ export class Kubectl {
 
   /** Run kubectl with argv (without the leading "kubectl"). Returns the exit code. */
   async run(argv: string[], io: IO, raw = ""): Promise<number> {
+    this.cluster.activate();
     const ctx: Ctx = { cluster: this.cluster, fs: this.fs, state: this.state, io, raw: raw || `kubectl ${argv.join(" ")}` };
     try {
       return await this.dispatch(ctx, argv);
@@ -191,8 +193,9 @@ export class Kubectl {
       case "cp":
       case "attach":
       case "debug":
-      case "certificate":
       case "kustomize":
+        return cmdKustomize(ctx, f);
+      case "certificate":
       case "plugin":
       case "events":
       case "diff":

@@ -2,7 +2,7 @@
 
 import type { KObject, ContainerSpec } from "../types.js";
 import { KubeError } from "../types.js";
-import { KINDS } from "../kinds.js";
+import { allKinds } from "../kinds.js";
 import { K8S_VERSION } from "../cluster.js";
 import { deepClone, matchMap, table, parseSelector, matchRequirements } from "../util.js";
 import { containerLogs } from "../controllers/kubelet.js";
@@ -12,6 +12,7 @@ import { type Ctx, out, err, nsOf, notFoundError, singleTarget, kindOrThrow, ref
 import { runInContainer } from "./container.js";
 import { canI, parseAs } from "./rbac.js";
 import { toYaml } from "./printers.js";
+import { kustomize } from "./kustomize.js";
 
 /** Resolve "pod-name", "pod/x", "deploy/x", "svc/x" to a concrete pod. */
 function podFor(ctx: Ctx, arg: string, ns: string, purpose: string): KObject {
@@ -408,7 +409,7 @@ export function cmdClusterInfo(ctx: Ctx): number {
 }
 
 export function cmdApiResources(ctx: Ctx, f: Flags): number {
-  let kinds = [...KINDS].sort((a, b) => a.plural.localeCompare(b.plural));
+  let kinds = [...allKinds()].sort((a, b) => a.plural.localeCompare(b.plural));
   const namespaced = f.str("namespaced");
   if (namespaced !== undefined) kinds = kinds.filter((k) => String(k.namespaced) === namespaced);
   if (f.str("output") === "name") {
@@ -463,6 +464,13 @@ export async function cmdPortForward(ctx: Ctx, f: Flags): Promise<number> {
   }
   cluster.scratch.set("portforwards", fwds);
   err(ctx, "(podsim) the port-forward keeps running in the background. Try: curl localhost:" + (specs[0].split(":")[0] || specs[0]));
+  return 0;
+}
+
+export async function cmdKustomize(ctx: Ctx, f: Flags): Promise<number> {
+  const dir = f.args[0] ?? ".";
+  const objs = kustomize(ctx.fs, dir);
+  out(ctx, objs.map((o) => toYaml(o).trimEnd()).join("\n---\n"));
   return 0;
 }
 

@@ -159,7 +159,7 @@ export async function cmdRun(ctx: Ctx, f: Flags): Promise<number> {
 // ------------------------------------------------------------------ create <sub>
 
 export async function cmdCreate(ctx: Ctx, f: Flags): Promise<number> {
-  if (f.all("filename").length) return createFromFiles(ctx, f);
+  if (f.all("filename").length || f.all("kustomize").length) return createFromFiles(ctx, f);
   const [sub, ...rest] = f.args;
   if (!sub) throw new KubeError("error: must specify one of -f and -k");
   const ns = nsOf(ctx, f);

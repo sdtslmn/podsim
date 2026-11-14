@@ -1,7 +1,8 @@
 // The simulated cluster: an in-memory API server plus controllers that
 // move objects through their lifecycle on a virtual clock.
 
-import { kindInfo, isKnownKind } from "./kinds.js";
+import { kindInfo, isKnownKind, useCustomKinds, type KindInfo } from "./kinds.js";
+import { crdToKind, validateCRD, validateCustom } from "./crd.js";
 import type { KObject } from "./types.js";
 import { KubeError } from "./types.js";
 import {
@@ -14,7 +15,7 @@ import {
   stableStringify,
   parseCpu,
 } from "./util.js";
-import { defaultPullPolicy } from "./images.js";
+import { defaultPullPolicy, useRegistry, type BuiltImage } from "./images.js";
 import { runControllers, type PodSim } from "./controllers/index.js";
 import { parseSchedule } from "./cron.js";
 import { admitPod, admitObject, templateWarnings } from "./admission.js";
@@ -62,6 +63,33 @@ export class Cluster {
   readonly controllerState = new Map<string, number>();
   /** Free-form memory for controllers (e.g. which finished jobs a CronJob already reported). */
   readonly scratch = new Map<string, unknown>();
+  /** Kinds served through CustomResourceDefinitions in this cluster. */
+  private customByKey = new Map<string, KindInfo>();
+  private customKinds: KindInfo[] = [];
+
+  /** Make this cluster's custom kinds the current ones (see kinds.ts). */
+  activate(): void {
+    useCustomKinds(this.customByKey, this.customKinds);
+    useRegistry(this.scratch.get("registry") as Map<string, BuiltImage> | undefined);
+  }
+
+  private registerCRD(crd: KObject): void {
+    const { info, keys } = crdToKind(crd);
+    this.unregisterCRD(crd.metadata.name, false);
+    this.customKinds.push(info);
+    for (const k of keys) this.customByKey.set(k, info);
+    this.customByKey.set(`crd:${crd.metadata.name}`, info);
+  }
+
+  private unregisterCRD(name: string, deleteObjects: boolean): void {
+    const info = this.customByKey.get(`crd:${name}`);
+    if (!info) return;
+    if (deleteObjects) for (const [k, o] of [...this.objects.entries()]) if (o.kind === info.kind && o.apiVersion.split("/")[0] === info.apiVersion.split("/")[0]) this.objects.delete(k);
+    for (const [k, v] of [...this.customByKey.entries()]) if (v === info) this.customByKey.delete(k);
+    const i = this.customKinds.indexOf(info);
+    if (i >= 0) this.customKinds.splice(i, 1);
+  }
+
   /** Admission warnings from the last create, for kubectl to print. */
   private warnings: string[] = [];
 
@@ -86,6 +114,7 @@ export class Cluster {
 
   /** Run the controllers forward to the current time, in steps, so state changes in order. */
   advance(): void {
+    this.activate();
     const target = this.now();
     const gap = target - this.lastT;
     if (gap <= 0) {
@@ -108,6 +137,7 @@ export class Cluster {
   // ---------------------------------------------------------------- store
 
   get(kind: string, name: string, namespace?: string): KObject | undefined {
+    this.activate();
     const info = kindInfo(kind);
     const obj = this.objects.get(key(info.kind, info.namespaced ? namespace ?? "default" : undefined, name));
     return obj;
@@ -115,6 +145,7 @@ export class Cluster {
 
   /** List objects of a kind. namespace undefined means all namespaces. */
   list(kind: string, namespace?: string): KObject[] {
+    this.activate();
     const info = kindInfo(kind);
     const out: KObject[] = [];
     for (const obj of this.objects.values()) {
@@ -131,6 +162,7 @@ export class Cluster {
 
   /** Controllers write through here: no validation, bumps resourceVersion. */
   put(obj: KObject): KObject {
+    this.activate();
     const info = kindInfo(obj.kind);
     obj.metadata.resourceVersion = String(++this.rv);
     this.objects.set(key(info.kind, info.namespaced ? obj.metadata.namespace : undefined, obj.metadata.name), obj);
@@ -139,6 +171,7 @@ export class Cluster {
 
   /** Remove an object and let garbage collection handle its dependents. */
   remove(kind: string, name: string, namespace?: string): KObject {
+    this.activate();
     const info = kindInfo(kind);
     const ns = info.namespaced ? namespace ?? "default" : undefined;
     const k = key(info.kind, ns, name);
@@ -156,6 +189,7 @@ export class Cluster {
       }
     }
     if (info.kind === "Pod" && obj.metadata.uid) this.releasePodSim(obj);
+    if (info.kind === "CustomResourceDefinition") this.unregisterCRD(name, true);
     if (info.kind === "Service") {
       this.usedServiceIps.delete(obj.spec?.clusterIP);
       for (const p of obj.spec?.ports ?? []) if (p.nodePort) this.usedNodePorts.delete(p.nodePort);
@@ -173,6 +207,7 @@ export class Cluster {
 
   /** Create an object as the API server would: validate, default, store. */
   create(input: KObject, opts: { dryRun?: boolean; at?: number } = {}): KObject {
+    this.activate();
     if (!input || typeof input !== "object" || !input.kind) {
       throw new KubeError("error: error validating data: [apiVersion not set, kind not set]");
     }
@@ -228,12 +263,24 @@ export class Cluster {
     if (opts.dryRun) return obj;
 
     this.allocate(obj);
+    if (info.kind === "CustomResourceDefinition") {
+      obj.status = {
+        conditions: [
+          { type: "NamesAccepted", status: "True", reason: "NoConflicts", message: "no conflicts found", lastTransitionTime: isoTime(now) },
+          { type: "Established", status: "True", reason: "InitialNamesAccepted", message: "the initial names have been accepted", lastTransitionTime: isoTime(now) },
+        ],
+        acceptedNames: obj.spec.names,
+        storedVersions: [(obj.spec.versions ?? []).find((v: { storage?: boolean }) => v.storage)?.name ?? "v1"],
+      };
+      this.registerCRD(obj);
+    }
     this.put(obj);
     return obj;
   }
 
   /** Replace an existing object (apply, edit, scale, set image). Enforces immutable fields. */
   replace(input: KObject): KObject {
+    this.activate();
     const info = kindInfo(input.kind);
     const ns = info.namespaced ? input.metadata.namespace ?? "default" : undefined;
     const existing = this.get(info.kind, input.metadata.name, ns);
@@ -316,6 +363,10 @@ export class Cluster {
       obj.status = existing.status;
     }
     if (info.kind === "Node" || info.kind === "Namespace") obj.status = obj.status ?? existing.status;
+    if (info.kind === "CustomResourceDefinition") {
+      obj.status = existing.status;
+      this.registerCRD(obj);
+    }
     if ((info.kind === "ConfigMap" || info.kind === "Secret") && existing.immutable === true) {
       if (stableStringify({ d: obj.data, b: obj.binaryData }) !== stableStringify({ d: existing.data, b: existing.binaryData })) {
         throw invalid(info.kind, obj.metadata.name, "data: Forbidden: field is immutable when `immutable` is set");
@@ -337,7 +388,12 @@ export class Cluster {
 
   private validate(obj: KObject): void {
     const name = obj.metadata.name;
+    const info = kindInfo(obj.kind);
+    if (info.custom) validateCustom(obj, info);
     switch (obj.kind) {
+      case "CustomResourceDefinition":
+        validateCRD(obj, (d) => invalid("CustomResourceDefinition", name, d));
+        break;
       case "Pod":
         validatePodSpec("Pod", name, obj.spec, "spec");
         break;

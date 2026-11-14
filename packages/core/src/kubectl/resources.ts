@@ -2,7 +2,7 @@
 
 import type { KObject } from "../types.js";
 import { KubeError } from "../types.js";
-import { KINDS, kindInfo, type KindInfo } from "../kinds.js";
+import { KINDS, kindInfo, resolveKind, type KindInfo } from "../kinds.js";
 import { deepClone, stableStringify } from "../util.js";
 import { validateFields } from "../schema.js";
 import { parse as parseYaml } from "yaml";
@@ -26,6 +26,7 @@ import { printTable, renderStructured, toYaml } from "./printers.js";
 import { describe } from "./describe.js";
 import { evalPath } from "./jsonpath.js";
 import { loadFiles } from "./manifest.js";
+import { kustomize } from "./kustomize.js";
 
 const LAST_APPLIED = "kubectl.kubernetes.io/last-applied-configuration";
 
@@ -34,16 +35,17 @@ const LAST_APPLIED = "kubectl.kubernetes.io/last-applied-configuration";
 export async function cmdGet(ctx: Ctx, f: Flags): Promise<number> {
   const { cluster } = ctx;
   cluster.advance();
-  let targets = parseTargets(f.args);
+  let targets: { info: KindInfo; names: string[]; nsOf?: Record<string, string> }[] = parseTargets(f.args);
   const files = f.all("filename");
-  if (files.length) {
-    const loaded = loadFiles(ctx.fs, files, ctx.io.stdin, f.bool("recursive"));
+  if (files.length || f.all("kustomize").length) {
+    const loaded = loadInputs(ctx, f);
     targets = [];
     for (const l of loaded) {
       const info = kindOrThrow(l.obj.kind);
       let t = targets.find((x) => x.info.kind === info.kind);
-      if (!t) targets.push((t = { info, names: [] }));
+      if (!t) targets.push((t = { info, names: [], nsOf: {} }));
       t.names.push(l.obj.metadata?.name);
+      if (l.obj.metadata?.namespace && !f.str("namespace")) t.nsOf![l.obj.metadata.name] = l.obj.metadata.namespace;
     }
   }
   if (targets.length === 0) {
@@ -67,7 +69,7 @@ export async function cmdGet(ctx: Ctx, f: Flags): Promise<number> {
       namedRequest = true;
       objs = [];
       for (const n of t.names) {
-        const o = cluster.get(t.info.kind, n, t.info.namespaced ? ns : undefined);
+        const o = cluster.get(t.info.kind, n, t.info.namespaced ? t.nsOf?.[n] ?? ns : undefined);
         if (o) objs.push(o);
         else errors.push(notFoundError(t.info, n).message);
       }
@@ -209,6 +211,28 @@ function prepareNamespace(ctx: Ctx, f: Flags, obj: KObject, info: KindInfo): voi
   obj.metadata.namespace = obj.metadata.namespace ?? flagNs ?? ctx.state.namespace;
 }
 
+/** The kind of an object read from a file, with kubectl's error for unknown kinds. */
+export function kindFromFile(raw: KObject, source: string): KindInfo {
+  if (!raw?.kind || !resolveKind(raw.kind)) {
+    throw new KubeError(`error: resource mapping not found for name: "${raw?.metadata?.name ?? ""}" namespace: "${raw?.metadata?.namespace ?? ""}" from "${source}": no matches for kind "${raw?.kind ?? ""}" in version "${raw?.apiVersion ?? ""}"\nensure CRDs are installed first`);
+  }
+  return kindOrThrow(raw.kind);
+}
+
+const ALT_VERSIONS: Record<string, string[]> = { HorizontalPodAutoscaler: ["autoscaling/v1", "autoscaling/v2"] };
+
+/** kubectl looks up kind and apiVersion before sending anything: removed or wrong versions fail here. */
+export function checkApiVersion(obj: KObject, info: KindInfo, source: string): void {
+  const v = obj.apiVersion;
+  if (!v) return;
+  const ok = info.custom
+    ? info.custom.versions.some((x) => `${info.apiVersion.split("/")[0]}/${x}` === v)
+    : v === info.apiVersion || (ALT_VERSIONS[info.kind] ?? []).includes(v);
+  if (!ok) {
+    throw new KubeError(`error: resource mapping not found for name: "${obj.metadata?.name ?? ""}" namespace: "${obj.metadata?.namespace ?? ""}" from "${source}": no matches for kind "${obj.kind}" in version "${v}"\nensure CRDs are installed first`);
+  }
+}
+
 /** Server errors for objects from files name the file, like kubectl does. */
 function withSource<T>(fn: () => T, source: string, verb: "creating" | "applying"): T {
   try {
@@ -221,21 +245,28 @@ function withSource<T>(fn: () => T, source: string, verb: "creating" | "applying
   }
 }
 
-export async function cmdApply(ctx: Ctx, f: Flags): Promise<number> {
-  const { cluster } = ctx;
-  if (f.has("kustomize") || f.args[0] === "-k") throw new KubeError("(podsim) kustomize (-k) is not simulated yet.");
+/** Objects named by -f or -k. */
+export function loadInputs(ctx: Ctx, f: Flags): { obj: KObject; source: string }[] {
+  const dirs = f.all("kustomize");
+  if (dirs.length) return dirs.flatMap((d) => kustomize(ctx.fs, d).map((obj) => ({ obj, source: d })));
   const files = f.all("filename");
   if (files.length === 0) throw new KubeError("error: must specify one of -f and -k");
+  return loadFiles(ctx.fs, files, ctx.io.stdin, f.bool("recursive"));
+}
+
+export async function cmdApply(ctx: Ctx, f: Flags): Promise<number> {
+  const { cluster } = ctx;
   cluster.advance();
-  const loaded = loadFiles(ctx.fs, files, ctx.io.stdin, f.bool("recursive"));
+  const loaded = loadInputs(ctx, f);
   const isDry = dryRun(f);
   const output = f.str("output");
   let code = 0;
   const printed: KObject[] = [];
   for (const { obj: raw, source } of loaded) {
     try {
-      const info = kindOrThrow(raw.kind);
+      const info = kindFromFile(raw, source);
       const obj = deepClone(raw);
+      checkApiVersion(raw, info, source);
       prepareNamespace(ctx, f, obj, info);
       if (!obj.metadata.name) throw new KubeError(`error: error when retrieving current configuration of:\nResource: "${info.plural}", GroupVersionKind: "${info.apiVersion}, Kind=${info.kind}"\nName: "", Namespace: "${obj.metadata.namespace ?? ""}"\nfrom server for: "${source}": resource name may not be empty`);
       const existing = cluster.get(info.kind, obj.metadata.name, obj.metadata.namespace);
@@ -288,15 +319,16 @@ export async function cmdApply(ctx: Ctx, f: Flags): Promise<number> {
 export async function createFromFiles(ctx: Ctx, f: Flags): Promise<number> {
   const { cluster } = ctx;
   cluster.advance();
-  const loaded = loadFiles(ctx.fs, f.all("filename"), ctx.io.stdin, f.bool("recursive"));
+  const loaded = loadInputs(ctx, f);
   const isDry = dryRun(f);
   const output = f.str("output");
   let code = 0;
   const printed: KObject[] = [];
   for (const { obj: raw, source } of loaded) {
     try {
-      const info = kindOrThrow(raw.kind);
+      const info = kindFromFile(raw, source);
       const obj = deepClone(raw);
+      checkApiVersion(raw, info, source);
       prepareNamespace(ctx, f, obj, info);
       authorize(ctx, "create", info, obj.metadata.namespace);
       validateFields(obj as unknown as Record<string, unknown>, "creating", source);
@@ -331,7 +363,7 @@ export async function cmdReplace(ctx: Ctx, f: Flags): Promise<number> {
   let code = 0;
   for (const { obj: raw, source } of loaded) {
     try {
-      const info = kindOrThrow(raw.kind);
+      const info = kindFromFile(raw, source);
       const obj = deepClone(raw);
       prepareNamespace(ctx, f, obj, info);
       validateFields(obj as unknown as Record<string, unknown>, "replacing", source);
@@ -370,8 +402,8 @@ export async function cmdDelete(ctx: Ctx, f: Flags): Promise<number> {
   const victims: { info: KindInfo; obj: KObject }[] = [];
   const errors: string[] = [];
   const files = f.all("filename");
-  if (files.length) {
-    for (const { obj } of loadFiles(ctx.fs, files, ctx.io.stdin, f.bool("recursive"))) {
+  if (files.length || f.all("kustomize").length) {
+    for (const { obj } of loadInputs(ctx, f)) {
       const info = kindOrThrow(obj.kind);
       const n = obj.metadata?.namespace ?? ns;
       const o = cluster.get(info.kind, obj.metadata.name, info.namespaced ? n : undefined);
@@ -493,7 +525,7 @@ function mergePatch(target: unknown, patch: unknown): unknown {
 }
 
 /** Strategic merge: like merge patch, but lists of objects with a "name" are merged by name. */
-function strategicPatch(target: unknown, patch: unknown): unknown {
+export function strategicPatch(target: unknown, patch: unknown): unknown {
   if (Array.isArray(patch) && Array.isArray(target) && patch.every((p) => p && typeof p === "object" && "name" in p)) {
     const result = deepClone(target) as Record<string, unknown>[];
     for (const p of patch as Record<string, unknown>[]) {
@@ -512,7 +544,7 @@ function strategicPatch(target: unknown, patch: unknown): unknown {
   return base;
 }
 
-function jsonPatch(target: unknown, ops: { op: string; path: string; value?: unknown; from?: string }[]): unknown {
+export function jsonPatch(target: unknown, ops: { op: string; path: string; value?: unknown; from?: string }[]): unknown {
   const doc = deepClone(target) as Record<string, unknown>;
   const parts = (p: string) => p.split("/").slice(1).map((s) => s.replace(/~1/g, "/").replace(/~0/g, "~"));
   for (const op of ops) {

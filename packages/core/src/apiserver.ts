@@ -5,7 +5,7 @@
 
 import type { Cluster } from "./cluster.js";
 import { K8S_VERSION } from "./cluster.js";
-import { KINDS, type KindInfo } from "./kinds.js";
+import { allKinds, type KindInfo } from "./kinds.js";
 import { canI, type Identity } from "./kubectl/rbac.js";
 import { cleanForOutput } from "./kubectl/printers.js";
 
@@ -35,7 +35,7 @@ export function identityFromToken(token: string | undefined): Identity {
 }
 
 function findKind(group: string, version: string, plural: string): KindInfo | undefined {
-  return KINDS.find((k) => {
+  return allKinds().find((k) => {
     const [g, v] = k.apiVersion.includes("/") ? k.apiVersion.split("/") : ["", k.apiVersion];
     return k.plural === plural && g === group && (v === version || !version);
   });
@@ -75,7 +75,7 @@ export function apiGet(cluster: Cluster, id: Identity, rawPath: string): ApiResp
     rest = rest.slice(2);
   }
   const [plural, name, sub] = rest;
-  if (!plural) return json(200, { kind: "APIResourceList", groupVersion: group ? `${group}/${version}` : version, resources: KINDS.filter((k) => findKind(group, version, k.plural)).map((k) => ({ name: k.plural, namespaced: k.namespaced, kind: k.kind, verbs: ["get", "list"] })) });
+  if (!plural) return json(200, { kind: "APIResourceList", groupVersion: group ? `${group}/${version}` : version, resources: allKinds().filter((k) => findKind(group, version, k.plural)).map((k) => ({ name: k.plural, namespaced: k.namespaced, kind: k.kind, verbs: ["get", "list"] })) });
   const info = findKind(group, version, plural);
   if (!info) return statusBody(404, "NotFound", "the server could not find the requested resource", {});
   const verb = name ? "get" : "list";

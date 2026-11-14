@@ -1,6 +1,8 @@
 // Registry of the resource types the simulator knows about.
 
 export interface KindInfo {
+  /** Custom resource kinds come from a CustomResourceDefinition. */
+  custom?: { printerColumns: { name: string; type: string; jsonPath: string; priority?: number }[]; schema?: Record<string, unknown>; version: string; versions: string[] };
   kind: string;
   plural: string;
   singular: string;
@@ -56,19 +58,38 @@ for (const k of KINDS) {
   for (const s of k.shortNames) byName.set(s, k);
 }
 
-/** Resolve "po", "pods", "Pod", "deployments.apps" to a kind. */
+// Custom resource kinds of the cluster currently being worked on. Each Cluster
+// keeps its own map and makes it current before it is used, so CRDs created
+// in one simulated cluster never leak into another.
+let custom = new Map<string, KindInfo>();
+let customList: KindInfo[] = [];
+
+export function useCustomKinds(byKey: Map<string, KindInfo>, list: KindInfo[]): void {
+  custom = byKey;
+  customList = list;
+}
+
+/** Every kind the current cluster serves: built-in kinds plus custom resources. */
+export function allKinds(): KindInfo[] {
+  return [...KINDS, ...customList];
+}
+
+/** Resolve "po", "pods", "Pod", "deployments.apps", "crontabs.stable.example.com" to a kind. */
 export function resolveKind(name: string): KindInfo | undefined {
   const lower = name.toLowerCase();
   const base = lower.split(".")[0];
-  return byName.get(lower) ?? byName.get(base);
+  const group = lower.split(".").slice(1).join(".");
+  const fromCustom = custom.get(lower) ?? (group ? customList.find((k) => k.plural === base && k.apiVersion.startsWith(group + "/")) : custom.get(base));
+  if (group && fromCustom) return fromCustom;
+  return byName.get(lower) ?? byName.get(base) ?? fromCustom;
 }
 
 export function kindInfo(kind: string): KindInfo {
-  const info = byName.get(kind.toLowerCase());
+  const info = byName.get(kind.toLowerCase()) ?? custom.get(kind.toLowerCase());
   if (!info) throw new Error(`unknown kind ${kind}`);
   return info;
 }
 
 export function isKnownKind(kind: string): boolean {
-  return byName.has(kind.toLowerCase());
+  return byName.has(kind.toLowerCase()) || custom.has(kind.toLowerCase());
 }

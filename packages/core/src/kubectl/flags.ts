@@ -55,6 +55,7 @@ const SHORT_ALIASES: Record<string, string> = {
   R: "recursive",
   h: "help",
   q: "quiet",
+  k: "kustomize",
 };
 
 export interface ParsedArgs {

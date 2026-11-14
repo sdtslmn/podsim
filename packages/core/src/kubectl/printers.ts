@@ -418,8 +418,32 @@ function columnsFor(cluster: Cluster, kind: string): Columns {
       };
     case "PriorityClass":
       return { headers: ["NAME", "VALUE", "GLOBAL-DEFAULT", "AGE", "PREEMPTIONPOLICY"], row: (c) => [c.metadata.name, String(c.value ?? 0), c.globalDefault ? "true" : "false", age(cluster, c.metadata.creationTimestamp), String(c.preemptionPolicy ?? "PreemptLowerPriority")] };
-    default:
+    default: {
+      let info;
+      try {
+        info = kindInfo(kind);
+      } catch {
+        info = undefined;
+      }
+      const cols = info?.custom?.printerColumns ?? [];
+      if (cols.length) {
+        const value = (o: KObject, c: { type: string; jsonPath: string }) => {
+          const v = evalPath(o, c.jsonPath.startsWith(".") ? c.jsonPath : "." + c.jsonPath)[0];
+          if (v === undefined || v === null) return "";
+          if (c.type === "date") return age(cluster, String(v));
+          return typeof v === "object" ? JSON.stringify(v) : String(v);
+        };
+        const main = cols.filter((c) => !c.priority);
+        const extra = cols.filter((c) => c.priority);
+        return {
+          headers: ["NAME", ...main.map((c) => c.name.toUpperCase())],
+          wide: extra.map((c) => c.name.toUpperCase()),
+          row: (o) => [o.metadata.name, ...main.map((c) => value(o, c))],
+          wideRow: (o) => extra.map((c) => value(o, c)),
+        };
+      }
       return { headers: ["NAME", "AGE"], row: (o) => [o.metadata.name, age(cluster, o.metadata.creationTimestamp)] };
+    }
   }
 }
 

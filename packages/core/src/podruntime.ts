@@ -5,7 +5,7 @@
 import type { Cluster } from "./cluster.js";
 import { fromBase64 } from "./cluster.js";
 import type { ContainerSpec, KObject } from "./types.js";
-import { parseImage } from "./images.js";
+import { parseImage, builtImage } from "./images.js";
 import { matchMap } from "./util.js";
 import { DIR, DELETED, normalizePath, Proc, execNow, formatDate, nginxPorts, setPortChecker, type Fs, type Host, type NetResult, type Server } from "./runtime.js";
 import { quoteArgv } from "./shparse.js";
@@ -156,6 +156,11 @@ interface ImageInfo {
   memMi: number;
   files?: Record<string, string>;
   dirs?: string[];
+  /** From a Dockerfile: ENTRYPOINT, CMD, ENV and WORKDIR. */
+  entrypoint?: string[];
+  cmd?: string[];
+  env?: Record<string, string>;
+  workdir?: string;
   /** Script run when the pod gives no command or args. */
   defaultScript?: (c: ContainerSpec, env: Record<string, string>) => string;
   shell: boolean;
@@ -307,6 +312,25 @@ const IMAGES: Record<string, ImageInfo> = {
     ["[ERROR] [Entrypoint]: Database is uninitialized and password option is not specified"],
     90,
   ),
+  "bitnami/nginx": {
+    tools: [...DEBIAN_TOOLS, "nginx", "curl"],
+    user: 1001,
+    memMi: 5,
+    shell: false,
+    files: { "/app/index.html": NGINX_PAGE, "/opt/bitnami/nginx/html/index.html": NGINX_PAGE, "/etc/nginx/nginx.conf": NGINX_MAIN.replace("user  nginx;\n", ""), "/etc/nginx/conf.d/default.conf": nginxConf(8080).replace("/usr/share/nginx/html", "/app") },
+    dirs: ["/app", "/var/cache/nginx", "/etc/nginx", "/etc/nginx/conf.d", "/opt/bitnami", "/opt/bitnami/nginx", "/opt/bitnami/nginx/html"],
+    defaultScript: () => `echo "nginx 10:00:00.00 INFO  ==> Welcome to the Bitnami nginx container"; echo "nginx 10:00:01.00 INFO  ==> ** Starting NGINX **"; nginx -g 'daemon off;'`,
+  },
+  "bitnami/apache": {
+    tools: [...DEBIAN_TOOLS, "httpd", "curl"],
+    user: 1001,
+    memMi: 8,
+    shell: false,
+    files: { "/app/index.html": "<html><body><h1>It works!</h1></body></html>\n" },
+    dirs: ["/app", "/opt/bitnami", "/opt/bitnami/apache"],
+    defaultScript: () => `echo "apache 10:00:00.00 INFO  ==> Welcome to the Bitnami apache container"; echo "apache 10:00:01.00 INFO  ==> ** Starting Apache **"; __serve static 8080 /app`,
+  },
+  "bitnami/redis": dbImage(6379, "redis-cli", ["redis 10:00:00.00 INFO  ==> ** Starting Redis **", "1:M * Ready to accept connections tcp"], ["REDIS_PASSWORD", "ALLOW_EMPTY_PASSWORD"], ["redis 10:00:00.00 ERROR ==> The REDIS_PASSWORD environment variable is empty or not set. Set the environment variable ALLOW_EMPTY_PASSWORD=yes to allow the container to be started with blank passwords. This is recommended only for development."], 4),
   "traefik/whoami": {
     tools: [],
     user: 0,
@@ -332,6 +356,22 @@ const IMAGES: Record<string, ImageInfo> = {
 };
 
 export function imageInfo(image: string): ImageInfo | undefined {
+  const built = builtImage(image);
+  if (built) {
+    const base = imageInfo(built.base) ?? IMAGES.busybox;
+    const own = built.entrypoint.length || built.cmd.length;
+    return {
+      ...base,
+      user: built.user ?? base.user,
+      files: { ...(base.files ?? {}), ...built.files },
+      dirs: [...(base.dirs ?? []), built.workdir],
+      env: { ...(base.env ?? {}), ...built.env },
+      workdir: built.workdir,
+      entrypoint: own ? built.entrypoint : base.entrypoint,
+      cmd: own ? built.cmd : base.cmd,
+      defaultScript: own ? undefined : base.defaultScript,
+    };
+  }
   const p = parseImage(image);
   if (p.registry === "registry.k8s.io" && p.repository === "ingress-nginx/controller") {
     return {
@@ -352,7 +392,9 @@ export function imageInfo(image: string): ImageInfo | undefined {
 /** What a container runs: its command and args, or the image default. */
 export function processFor(c: ContainerSpec, env: Record<string, string>): { argv: string[] } | { script: string } {
   const info = imageInfo(c.image);
-  const argv = [...(c.command ?? []), ...(c.args ?? [])].map((a) => a.replace(/\$\(([A-Za-z_]\w*)\)/g, (m, k) => env[k] ?? m));
+  // Like Kubernetes: command replaces ENTRYPOINT, args replaces CMD.
+  const fromImage = info?.entrypoint?.length || info?.cmd?.length ? [...(c.command ?? info.entrypoint ?? []), ...(c.args ?? (c.command ? [] : info.cmd ?? []))] : [...(c.command ?? []), ...(c.args ?? [])];
+  const argv = fromImage.map((a) => a.replace(/\$\(([A-Za-z_]\w*)\)/g, (m, k) => env[k] ?? m));
   // An interactive shell (kubectl run -it) waits for input instead of exiting.
   const shellOnly = argv.length === 0 ? !!info?.shell : argv.length === 1 && /^(\/bin\/)?(sh|bash|ash)$/.test(argv[0]);
   if (c.stdin && shellOnly) return { script: "sleep infinity" };
@@ -730,6 +772,7 @@ export function containerFs(cluster: Cluster, pod: KObject, c: ContainerSpec, si
   if (pod.spec?.nodeName) base.set("/etc/podsim-node", pod.spec.nodeName);
   const writable = ["/tmp", "/var/tmp", "/dev/shm", "/home"];
   if (parseImage(c.image).repository === "nginxinc/nginx-unprivileged") writable.push("/var/cache/nginx", "/run", "/etc/nginx/conf.d");
+  if (parseImage(c.image).repository.startsWith("bitnami/")) writable.push("/var/cache/nginx", "/app", "/opt/bitnami", "/tmp");
   return new ContainerFs(mounts, overlay, base, dirs, id.uid, id.readOnlyRoot, writable);
 }
 
@@ -748,6 +791,7 @@ export function hostFor(cluster: Cluster, pod: KObject, c: ContainerSpec, cs: Co
   const id = identityFor(pod, c);
   const env = {
     PATH: "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+    ...(imageInfo(c.image)?.env ?? {}),
     ...serviceEnv(cluster, pod.metadata.namespace ?? "default"),
     ...resolveEnv(cluster, pod, c).env,
     HOSTNAME: pod.spec?.hostname ?? pod.metadata.name,
@@ -776,6 +820,8 @@ export function startProcess(cluster: Cluster, pod: KObject, c: ContainerSpec, c
   const host = hostFor(cluster, pod, c, cs);
   const what = processFor(c, host.env);
   const proc = new Proc(host, "argv" in what ? what.argv : what, at, (c.command ?? c.args ?? ["sh"])[0] ?? "sh");
+  const wd = (c.workingDir as string | undefined) ?? imageInfo(c.image)?.workdir;
+  if (wd) proc.x.vars.PWD = wd;
   return proc;
 }
 

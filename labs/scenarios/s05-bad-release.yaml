@@ -1,0 +1,55 @@
+id: s05-bad-release
+title: "Bad release at 2 AM"
+level: scenario
+minutes: 15
+tracks: [ckad]
+topic: Real-life scenarios
+intro: |
+  The pager goes off at 2 AM: the website in the namespace `site` is
+  degraded. It is deployed with Helm as the release `web` (chart
+  `bitnami/nginx`). Someone ran an upgrade late in the evening.
+
+  Get the site healthy first, then find out what went wrong so the morning
+  team can fix the pipeline.
+setup:
+  - helm repo add bitnami https://charts.bitnami.com/bitnami
+  - helm install web bitnami/nginx -n site --create-namespace --set replicaCount=2 --set service.type=ClusterIP
+  - sleep 20
+  - helm upgrade web bitnami/nginx -n site --reuse-values --set image.tag=1.29.3-debain-12-r0
+settle: 30
+tasks:
+  - Find the last Helm revision that worked and roll the release back to it.
+  - Write the value that broke the release (the exact image tag) to `bad-tag.txt`.
+  - Make sure the site serves pages again with 2 ready replicas.
+checks:
+  - name: The release was rolled back to revision 1
+    command: helm history web -n site
+    outputMatches: "3\\s+.*deployed\\s+.*Rollback to 1"
+  - name: The Deployment has 2 ready replicas
+    kind: Deployment
+    namespace: site
+    resource: web-nginx
+    path: .status.readyReplicas
+    equals: 2
+  - name: The broken tag is gone from the Deployment
+    kind: Deployment
+    namespace: site
+    resource: web-nginx
+    path: .spec.template.spec.containers[0].image
+    matches: "^(?!.*debain)"
+  - name: bad-tag.txt has the broken tag
+    command: cat bad-tag.txt
+    outputMatches: "^\\s*1\\.29\\.3-debain-12-r0\\s*$"
+hints:
+  - "kubectl get pods -n site shows ImagePullBackOff on the new Pods. helm history web -n site lists the revisions."
+  - "helm get values web -n site --revision 2 shows what the upgrade changed. Note the typo."
+  - "helm rollback web 1 -n site"
+solution:
+  - helm rollback web 1 -n site
+  - echo 1.29.3-debain-12-r0 > bad-tag.txt
+  - sleep 20
+learned: |
+  A rolling update keeps old Pods serving while new ones fail to start, which
+  is why the site was degraded rather than down. helm rollback creates a new
+  revision with the old values; the broken revision stays in the history for
+  the post-mortem. helm upgrade --atomic would have rolled back by itself.

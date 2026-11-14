@@ -7,7 +7,7 @@ import * as path from "node:path";
 import * as readline from "node:readline";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
-import { Cluster, Shell, LabSession, MemoryFS, parseLab, parseExam, examTaskLabs, ExamSession, K8S_VERSION, type IO, type Lab, type Exam } from "@podsim/core";
+import { Cluster, Shell, LabSession, MemoryFS, parseLab, parseExam, examTaskLabs, ExamSession, parseCurriculum, curriculumOrder, labCode, findLabByRef, K8S_VERSION, type IO, type Lab, type Exam, type Curriculum } from "@podsim/core";
 import { NodeFS } from "./nodefs.js";
 
 const VERSION = "0.2.0";
@@ -132,11 +132,11 @@ function printUsage(): void {
 
 Usage:
   podsim                     open the practice shell (free sandbox)
-  podsim labs                list the labs
-  podsim lab <id|number>     start a lab, e.g. podsim lab 1
+  podsim lab <code>          start a lab, e.g. podsim lab b1 or podsim lab s2
   podsim exams               list the timed mock exams
   podsim exam [id]           start a mock exam (120 minutes, scored at the end)
-  podsim validate-labs       check that every lab and exam task is solved by its own solution
+  podsim labs [ckad]         list the learning path, or a certification track
+  podsim validate-labs [id]  check that every lab and exam task is solved by its own solution
   podsim -c "<command>"      run one command on a fresh cluster and exit
 
 Options:
@@ -155,7 +155,7 @@ function loadLabs(dir: string): Lab[] {
     for (const entry of fs.readdirSync(d, { withFileTypes: true })) {
       const p = path.join(d, entry.name);
       if (entry.isDirectory()) walk(p);
-      else if (/\.ya?ml$/.test(entry.name)) {
+      else if (/\.ya?ml$/.test(entry.name) && !/^curriculum\.ya?ml$/.test(entry.name)) {
         try {
           labs.push(parseLab(fs.readFileSync(p, "utf8"), p));
         } catch (e) {
@@ -165,16 +165,25 @@ function loadLabs(dir: string): Lab[] {
     }
   };
   walk(dir);
-  const order = { beginner: 0, intermediate: 1, advanced: 2 };
-  return labs.sort((a, b) => order[a.level] - order[b.level] || a.id.localeCompare(b.id));
+  const order = { beginner: 0, intermediate: 1, advanced: 2, scenario: 3 };
+  labs.sort((a, b) => order[a.level] - order[b.level] || a.id.localeCompare(b.id));
+  return curriculumOrder(loadCurriculum(dir), labs);
+}
+
+function loadCurriculum(dir: string, labs?: Lab[], examIds?: string[]): Curriculum {
+  const file = path.join(dir, "curriculum.yaml");
+  if (!fs.existsSync(file)) return { levels: [], tracks: [] };
+  try {
+    return parseCurriculum(fs.readFileSync(file, "utf8"), labs, examIds);
+  } catch (e) {
+    if (labs) throw e;
+    console.error(yellow(`warning: ${(e as Error).message}`));
+    return { levels: [], tracks: [] };
+  }
 }
 
 function findLab(labs: Lab[], arg: string): Lab | undefined {
-  if (/^\d+$/.test(arg)) {
-    const n = parseInt(arg, 10);
-    return labs.find((l) => parseInt(l.id, 10) === n) ?? labs[n - 1];
-  }
-  return labs.find((l) => l.id === arg || l.id.endsWith(arg) || l.id.includes(arg));
+  return findLabByRef(labs, arg);
 }
 
 function progressFile(workDir: string): string {
@@ -194,19 +203,38 @@ function saveProgress(workDir: string, done: Set<string>): void {
   fs.writeFileSync(progressFile(workDir), JSON.stringify([...done], null, 2));
 }
 
-function listLabs(labs: Lab[], done: Set<string>): string {
+function listLabs(labs: Lab[], done: Set<string>, curriculum: Curriculum, trackId?: string): string {
   if (labs.length === 0) return "No labs found.";
-  const lines = [bold("Labs")];
-  let level = "";
-  for (const l of labs) {
-    if (l.level !== level) {
-      level = l.level;
-      lines.push("", dim(`  ${level}`));
+  const byId = new Map(labs.map((l) => [l.id, l]));
+  const row = (id: string, indent: string) => {
+    const l = byId.get(id);
+    return l ? `${indent}${done.has(id) ? green("✔") : " "} ${cyan(labCode(id).padEnd(4))} ${l.title}  ${dim(`${l.minutes} min`)}` : "";
+  };
+  const lines: string[] = [];
+  const track = curriculum.tracks.find((t) => t.id === trackId);
+  if (track) {
+    lines.push(bold(`${track.title} track`), "");
+    for (const sec of track.sections) {
+      lines.push(bold(`${sec.title}${sec.weight ? dim(` (${sec.weight}%)`) : ""}`));
+      for (const id of sec.labs) lines.push(row(id, "  "));
     }
-    const mark = done.has(l.id) ? green("✔") : " ";
-    lines.push(`  ${mark} ${cyan(l.id.padEnd(22))} ${l.title}  ${dim(`(${l.minutes} min, ${l.topic})`)}`);
+    if (track.exams.length) lines.push("", `${bold("Mock exams")}: ${track.exams.map((e) => cyan(`podsim exam ${e}`)).join(", ")}`);
+    return lines.join("\n");
   }
-  lines.push("", `Start one with ${cyan("lab <number>")}, for example ${cyan("lab 1")}.`);
+  if (!curriculum.levels.length) {
+    lines.push(bold("Labs"));
+    for (const l of labs) lines.push(row(l.id, "  "));
+  }
+  curriculum.levels.forEach((lv, i) => {
+    const ids = lv.modules.flatMap((m) => m.labs);
+    lines.push("", `${bold(`${i + 1}. ${lv.title}`)}  ${dim(`${ids.filter((id) => done.has(id)).length}/${ids.length} done`)}`);
+    for (const m of lv.modules) {
+      lines.push(dim(`   ${m.title}`));
+      for (const id of m.labs) lines.push(row(id, "    "));
+    }
+  });
+  const tracks = curriculum.tracks.map((t) => cyan(`labs ${t.id}`)).join(", ");
+  lines.push("", `Start one with ${cyan("lab <code>")}, for example ${cyan("lab b1")}.${tracks ? ` Certification tracks: ${tracks}.` : ""}`);
   return lines.join("\n");
 }
 
@@ -249,6 +277,7 @@ const LAB_COMMANDS = ["labs", "lab", "task", "check", "hint", "solution", "reset
 
 class Repl {
   private labs: Lab[];
+  private curriculum: Curriculum;
   private done: Set<string>;
   private lab?: Lab;
   private session?: LabSession;
@@ -263,6 +292,7 @@ class Repl {
 
   constructor(private opts: Options) {
     this.labs = loadLabs(opts.labsDir);
+    this.curriculum = loadCurriculum(opts.labsDir);
     this.done = loadProgress(opts.workDir);
   }
 
@@ -338,18 +368,18 @@ class Repl {
   private registerLabCommands(): void {
     const needLab = (io: IO): boolean => {
       if (this.lab) return true;
-      io.stderr(`You are in the free sandbox. Start a lab first, e.g. ${cyan("lab 1")}. Type ${cyan("labs")} to see them all.\n`);
+      io.stderr(`You are in the free sandbox. Start a lab first, e.g. ${cyan("lab b1")}. Type ${cyan("labs")} to see them all.\n`);
       return false;
     };
     const s = this.shell;
-    s.registerCommand("labs", () => {
-      this.print(listLabs(this.labs, this.done));
+    s.registerCommand("labs", (args) => {
+      this.print(listLabs(this.labs, this.done, this.curriculum, args[0]));
       return 0;
     });
     s.registerCommand("lab", async (args, io) => {
       if (!args[0]) {
         if (this.lab) this.showLab();
-        else this.print(listLabs(this.labs, this.done));
+        else this.print(listLabs(this.labs, this.done, this.curriculum));
         return 0;
       }
       const lab = findLab(this.labs, args[0]);
@@ -527,9 +557,9 @@ EDITOR (e.g. EDITOR="code --wait") to open them with vi/nano/code from here.`);
   }
 
   private nextLab(): Lab | undefined {
-    if (!this.lab) return this.labs[0];
+    if (!this.lab) return this.labs.find((l) => !this.done.has(l.id)) ?? this.labs[0];
     const i = this.labs.findIndex((l) => l.id === this.lab!.id);
-    return this.labs[i + 1];
+    return this.labs.slice(i + 1).find((l) => !this.done.has(l.id)) ?? this.labs[i + 1];
   }
 
   private prompt(): string {
@@ -539,7 +569,7 @@ EDITOR (e.g. EDITOR="code --wait") to open them with vi/nano/code from here.`);
     }
     const inContainer = this.shell.sessionPrompt();
     if (inContainer) return inContainer;
-    const tag = this.lab ? yellow(`[${this.lab.id.split("-")[0]}] `) : "";
+    const tag = this.lab ? yellow(`[${labCode(this.lab.id)}] `) : "";
     return `${tag}${green("controlplane")}:${cyan("~")}$ `;
   }
 
@@ -585,7 +615,7 @@ EDITOR (e.g. EDITOR="code --wait") to open them with vi/nano/code from here.`);
       else this.print(red(`No lab matches "${firstLab}".`));
     } else {
       this.print("");
-      this.print(`Type ${cyan("labs")} to see the labs, ${cyan("lab 1")} to start the first one, or just use ${cyan("kubectl")}.`);
+      this.print(`Type ${cyan("labs")} to see the learning path, ${cyan("lab b1")} to start the first lab, or just use ${cyan("kubectl")}.`);
       this.print(`Type ${cyan("help")} for all commands.`);
     }
     this.print("");
@@ -685,18 +715,26 @@ async function main(): Promise<void> {
       await new Repl(opts).run();
       return;
     case "labs":
-      console.log(listLabs(loadLabs(opts.labsDir), loadProgress(opts.workDir)));
+      console.log(listLabs(loadLabs(opts.labsDir), loadProgress(opts.workDir), loadCurriculum(opts.labsDir), opts.labArg));
       return;
     case "lab":
       if (!opts.labArg) {
-        console.error("Usage: podsim lab <id|number>");
+        console.error("Usage: podsim lab <code>, for example podsim lab b1");
         process.exit(1);
       }
       await new Repl(opts).run(opts.labArg);
       return;
-    case "validate-labs":
-      process.exit(await validateLabs([...loadLabs(opts.labsDir), ...loadExams(opts.examsDir).flatMap((e) => examTaskLabs(e))]));
+    case "validate-labs": {
+      const all = loadLabs(opts.labsDir);
+      try {
+        loadCurriculum(opts.labsDir, all, loadExams(opts.examsDir).map((e) => e.id));
+      } catch (e) {
+        console.error(red(`✘ ${(e as Error).message}`));
+        process.exit(1);
+      }
+      process.exit(await validateLabs([...loadLabs(opts.labsDir), ...loadExams(opts.examsDir).flatMap((e) => examTaskLabs(e))].filter((l) => !opts.labArg || l.id.includes(opts.labArg))));
       return;
+    }
     case "exams":
       console.log(listExams(loadExams(opts.examsDir)));
       return;

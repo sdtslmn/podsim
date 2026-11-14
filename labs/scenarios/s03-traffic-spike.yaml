@@ -1,0 +1,92 @@
+id: s03-traffic-spike
+title: "Traffic spike: autoscale without breaking the budget"
+level: scenario
+minutes: 20
+tracks: [ckad, cka]
+topic: Real-life scenarios
+intro: |
+  A marketing campaign went live and the `storefront` Deployment in the
+  namespace `retail` is maxing out its CPU. Product wants it to scale with
+  demand; finance wants a hard ceiling; operations wants at least 2 Pods
+  up during node maintenance.
+
+  The namespace has a ResourceQuota `retail-quota` that caps CPU requests
+  at 2 cores. Read it before you pick numbers.
+setup:
+  - kubectl create namespace retail
+  - kubectl create quota retail-quota -n retail --hard=requests.cpu=2,limits.cpu=4,pods=10
+  - |
+    cat <<EOF | kubectl apply -f -
+    apiVersion: apps/v1
+    kind: Deployment
+    metadata:
+      name: storefront
+      namespace: retail
+    spec:
+      replicas: 2
+      selector:
+        matchLabels:
+          app: storefront
+      template:
+        metadata:
+          labels:
+            app: storefront
+        spec:
+          containers:
+          - name: storefront
+            image: polinux/stress
+            command: ["stress", "--cpu", "1"]
+            resources:
+              requests:
+                cpu: 300m
+              limits:
+                cpu: 500m
+    EOF
+settle: 30
+tasks:
+  - Create a HorizontalPodAutoscaler for `storefront` that targets 60% CPU, with at least 2 replicas and as many as the quota allows at the current requests of 300m per Pod.
+  - Create a PodDisruptionBudget `storefront-pdb` that keeps at least 2 `storefront` Pods available.
+  - Wait until the autoscaler has scaled up as far as it can.
+checks:
+  - name: The HPA targets 60% CPU
+    kind: HorizontalPodAutoscaler
+    namespace: retail
+    resource: storefront
+    path: .spec.metrics[0].resource.target.averageUtilization
+    equals: 60
+  - name: The HPA keeps at least 2 replicas
+    kind: HorizontalPodAutoscaler
+    namespace: retail
+    resource: storefront
+    path: .spec.minReplicas
+    equals: 2
+  - name: maxReplicas fits the quota (6 x 300m = 1.8 cores)
+    kind: HorizontalPodAutoscaler
+    namespace: retail
+    resource: storefront
+    path: .spec.maxReplicas
+    equals: 6
+  - name: storefront scaled to 6 running Pods
+    kind: Deployment
+    namespace: retail
+    resource: storefront
+    path: .status.readyReplicas
+    equals: 6
+  - name: The PDB keeps 2 Pods available
+    kind: PodDisruptionBudget
+    namespace: retail
+    resource: storefront-pdb
+    path: .spec.minAvailable
+    equals: 2
+hints:
+  - "kubectl describe quota -n retail: 2 cores of requests at 300m per Pod is 6 Pods (a 7th would need 2.1)."
+  - "kubectl autoscale deployment storefront -n retail --min=2 --max=6 --cpu-percent=60"
+  - "kubectl create pdb storefront-pdb -n retail --selector=app=storefront --min-available=2"
+solution:
+  - kubectl autoscale deployment storefront -n retail --min=2 --max=6 --cpu-percent=60
+  - kubectl create pdb storefront-pdb -n retail --selector=app=storefront --min-available=2
+  - sleep 120
+learned: |
+  If maxReplicas is higher than the quota allows, the HPA asks for more
+  Pods, the ReplicaSet gets "exceeded quota" errors and the extra Pods never
+  appear. Size the quota, the requests and maxReplicas together.

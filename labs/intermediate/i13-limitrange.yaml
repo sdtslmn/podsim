@@ -1,0 +1,77 @@
+id: i13-limitrange
+title: Set defaults and limits with a LimitRange
+level: intermediate
+minutes: 10
+tracks: [ckad, cka]
+topic: Health and resources
+intro: |
+  A LimitRange sets per-container rules in a namespace: default requests and
+  limits for containers that declare none, and the minimum and maximum a
+  container may ask for. It is applied when a Pod is created, so it does not
+  change Pods that already exist.
+setup:
+  - kubectl create namespace dev
+tasks:
+  - In the namespace `dev`, create a LimitRange named `container-limits` for containers with a default request of 100m CPU and 64Mi memory, a default limit of 250m CPU and 128Mi memory, and a maximum of 1 CPU and 512Mi memory.
+  - Create a Pod named `small` in `dev` with the image `nginx:1.29` and no resources, and check what it received.
+  - Try to create a Pod named `big` in `dev` that limits CPU to 2. It must be rejected.
+checks:
+  - name: The default CPU limit is 250m
+    kind: LimitRange
+    namespace: dev
+    resource: container-limits
+    path: .spec.limits[0].default.cpu
+    equals: 250m
+  - name: The maximum memory is 512Mi
+    kind: LimitRange
+    namespace: dev
+    resource: container-limits
+    path: .spec.limits[0].max.memory
+    equals: 512Mi
+  - name: Pod small got a 64Mi memory request
+    kind: Pod
+    namespace: dev
+    resource: small
+    path: .spec.containers[0].resources.requests.memory
+    equals: 64Mi
+  - name: Pod small got a 250m CPU limit
+    kind: Pod
+    namespace: dev
+    resource: small
+    path: .spec.containers[0].resources.limits.cpu
+    equals: 250m
+  - name: Pod big does not exist
+    kind: Pod
+    namespace: dev
+    resource: big
+    expect: absent
+hints:
+  - "Start from the LimitRange example in the docs: spec.limits with type: Container, default, defaultRequest and max."
+  - "kubectl run big -n dev --image=nginx:1.29 --dry-run=client -o yaml, add resources.limits.cpu: 2, then apply it and read the error."
+solution:
+  - |
+    cat <<EOF | kubectl apply -f -
+    apiVersion: v1
+    kind: LimitRange
+    metadata:
+      name: container-limits
+      namespace: dev
+    spec:
+      limits:
+      - type: Container
+        default:
+          cpu: 250m
+          memory: 128Mi
+        defaultRequest:
+          cpu: 100m
+          memory: 64Mi
+        max:
+          cpu: "1"
+          memory: 512Mi
+    EOF
+  - kubectl run small -n dev --image=nginx:1.29
+learned: |
+  "maximum cpu usage per Container is 1, but limit is 2" is the LimitRange
+  rejecting a Pod. kubectl describe limitrange shows every rule. Combined
+  with a ResourceQuota, a LimitRange keeps Pods without resources from
+  being rejected by the quota.

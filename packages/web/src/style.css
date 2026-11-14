@@ -256,6 +256,104 @@ input.filename {
   margin-bottom: 8px;
 }
 
+.tabs {
+  display: flex;
+  gap: 4px;
+  margin: 12px 0 8px;
+  border-bottom: 1px solid var(--border);
+}
+
+.tab {
+  font: inherit;
+  font-size: 14px;
+  padding: 6px 12px;
+  border: 0;
+  border-bottom: 2px solid transparent;
+  background: none;
+  cursor: pointer;
+  color: var(--muted);
+}
+
+.tab.active {
+  color: var(--text);
+  border-bottom-color: var(--accent);
+  font-weight: 600;
+}
+
+details.level {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 8px 12px;
+  margin: 10px 0;
+}
+
+details.level summary {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+  list-style: none;
+}
+
+details.level summary::-webkit-details-marker {
+  display: none;
+}
+
+details.level summary::before {
+  content: "▸";
+  color: var(--muted);
+}
+
+details.level[open] summary::before {
+  content: "▾";
+}
+
+.level-title {
+  font-weight: 600;
+  flex: 1;
+}
+
+details.level h4 {
+  margin: 12px 0 4px;
+  font-size: 13px;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+
+.progress {
+  display: inline-block;
+  width: 80px;
+  height: 6px;
+  background: #e6e8eb;
+  border-radius: 3px;
+  overflow: hidden;
+}
+
+.progress span {
+  display: block;
+  height: 100%;
+  background: var(--ok);
+}
+
+.lab-list .code {
+  font-family: ui-monospace, "Cascadia Code", Consolas, monospace;
+  font-size: 12px;
+  color: var(--muted);
+  width: 34px;
+  flex: none;
+}
+
+.tag {
+  display: inline-block;
+  font-size: 12px;
+  padding: 2px 8px;
+  border-radius: 10px;
+  background: #eaf0fd;
+  color: #1f4fbf;
+  margin-right: 4px;
+}
+
 .exam-head {
   display: flex;
   justify-content: space-between;
@@ -382,4 +480,8 @@ input.filename {
   .brand .tag {
     display: none;
   }
+}
+
+.lab-list li > span:nth-child(2) {
+  flex: 1;
 }

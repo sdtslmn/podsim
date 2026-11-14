@@ -1,0 +1,84 @@
+id: a02-blue-green
+title: Switch traffic from blue to green
+level: advanced
+minutes: 8
+tracks: [ckad]
+topic: Release strategies
+intro: |
+  Blue/green keeps two complete versions running and moves all traffic at
+  once by changing the Service selector. The Deployments `checkout-blue`
+  and `checkout-green` are both running; the Service `checkout` still
+  sends everything to blue.
+setup:
+  - |
+    cat <<EOF | kubectl apply -f -
+    apiVersion: apps/v1
+    kind: Deployment
+    metadata:
+      name: checkout-blue
+    spec:
+      replicas: 2
+      selector:
+        matchLabels: {app: checkout, color: blue}
+      template:
+        metadata:
+          labels: {app: checkout, color: blue}
+        spec:
+          containers:
+          - name: app
+            image: hashicorp/http-echo:1.0
+            args: ["-text=blue", "-listen=:8080"]
+    ---
+    apiVersion: apps/v1
+    kind: Deployment
+    metadata:
+      name: checkout-green
+    spec:
+      replicas: 2
+      selector:
+        matchLabels: {app: checkout, color: green}
+      template:
+        metadata:
+          labels: {app: checkout, color: green}
+        spec:
+          containers:
+          - name: app
+            image: hashicorp/http-echo:1.0
+            args: ["-text=green", "-listen=:8080"]
+    ---
+    apiVersion: v1
+    kind: Service
+    metadata:
+      name: checkout
+    spec:
+      selector: {app: checkout, color: blue}
+      ports:
+      - port: 80
+        targetPort: 8080
+    EOF
+tasks:
+  - Switch the Service `checkout` so that all traffic goes to the green Pods.
+  - Then scale `checkout-blue` down to 0 replicas, keeping the Deployment for a quick rollback.
+checks:
+  - name: The Service selects color=green
+    kind: Service
+    resource: checkout
+    path: .spec.selector.color
+    equals: green
+  - name: Requests reach the green version
+    command: kubectl run lab-check --rm -i --image=busybox:1.36 --restart=Never -- wget -qO- -T 2 http://checkout
+    outputMatches: green
+  - name: checkout-blue is scaled to 0
+    kind: Deployment
+    resource: checkout-blue
+    path: .spec.replicas
+    equals: 0
+hints:
+  - "kubectl patch service checkout -p '{\"spec\":{\"selector\":{\"color\":\"green\"}}}' changes only the color key."
+  - "kubectl scale deployment checkout-blue --replicas=0"
+solution:
+  - "kubectl patch service checkout -p '{\"spec\":{\"selector\":{\"app\":\"checkout\",\"color\":\"green\"}}}'"
+  - kubectl scale deployment checkout-blue --replicas=0
+learned: |
+  Changing the selector moves all traffic in one step, and changing it back
+  is the rollback. The cost is running two full copies for a while.

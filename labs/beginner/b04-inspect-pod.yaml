@@ -1,0 +1,49 @@
+id: b04-inspect-pod
+title: Inspect a running Pod
+level: beginner
+minutes: 10
+tracks: [kcna, ckad, cka]
+topic: First steps
+intro: |
+  Most of the time with Kubernetes is spent looking at things. Four commands
+  answer most questions about a Pod:
+
+  - `kubectl get pod NAME -o wide`: status, IP address and node
+  - `kubectl describe pod NAME`: the full spec plus the events
+  - `kubectl logs NAME`: what the container printed
+  - `kubectl exec NAME -- COMMAND`: run a command inside the container
+
+  The Pod `api` is already running.
+setup:
+  - kubectl run api --image=nginx:1.29 --env=GREETING=hello-from-api --labels=app=api,team=payments
+tasks:
+  - Find the node that runs `api` and write its name to `api-node.txt`.
+  - Find the Pod's IP address and write it to `api-ip.txt`.
+  - Read the environment variable `GREETING` inside the container with `kubectl exec` and write its value to `greeting.txt`.
+  - Find the team label of the Pod and write it to `team.txt`.
+checks:
+  - name: api-node.txt names the right node
+    command: "test \"$(cat api-node.txt)\" = \"$(kubectl get pod api -o jsonpath='{.spec.nodeName}')\""
+    exitCode: 0
+  - name: api-ip.txt has the Pod IP
+    command: "test \"$(cat api-ip.txt)\" = \"$(kubectl get pod api -o jsonpath='{.status.podIP}')\""
+    exitCode: 0
+  - name: greeting.txt has the value of GREETING
+    command: cat greeting.txt
+    outputMatches: "^\\s*hello-from-api\\s*$"
+  - name: team.txt has the team label
+    command: cat team.txt
+    outputMatches: "^\\s*payments\\s*$"
+hints:
+  - "kubectl get pod api -o wide shows the IP and the NODE columns."
+  - "kubectl exec api -- printenv GREETING > greeting.txt"
+  - "kubectl get pod api --show-labels, or kubectl describe pod api, shows the labels."
+solution:
+  - kubectl get pod api -o jsonpath='{.spec.nodeName}' > api-node.txt
+  - kubectl get pod api -o jsonpath='{.status.podIP}' > api-ip.txt
+  - kubectl exec api -- printenv GREETING > greeting.txt
+  - kubectl get pod api -o jsonpath='{.metadata.labels.team}' > team.txt
+learned: |
+  -o jsonpath='{...}' pulls one field out of an object, which is handy in
+  scripts and in the exam. Pod IPs change when a Pod is recreated, which is
+  why other Pods reach it through a Service instead.

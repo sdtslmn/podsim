@@ -1,0 +1,129 @@
+# The learning path from zero to production, and the certification tracks.
+# Every lab must appear here at least once. Run npm run validate-labs after changes.
+
+levels:
+  - id: beginner
+    title: Beginner
+    summary: |
+      Start from zero: what a cluster is, how to run and inspect Pods, and the
+      everyday objects every Kubernetes user needs.
+    modules:
+      - title: First steps
+        summary: Look around the cluster, run a Pod, write a manifest, inspect what runs.
+        labs: [b01-cluster-tour, b02-first-pod, b03-pod-from-yaml, b04-inspect-pod]
+      - title: Organizing resources
+        summary: Namespaces, labels, selectors and annotations.
+        labs: [b05-namespaces, b06-labels]
+      - title: Deployments
+        summary: Keep Pods running, scale them, update them and roll back.
+        labs: [b07-deployment, b08-scale, b09-rolling-update, b10-rollback]
+      - title: Services
+        summary: Give Pods a stable address and find it through DNS.
+        labs: [b11-service, b12-service-dns]
+      - title: Configuration
+        summary: Keep settings and secrets out of the image.
+        labs: [b13-configmap-env, b14-secret-env]
+      - title: Troubleshooting basics
+        summary: The two failures every beginner meets first.
+        labs: [b15-fix-imagepull, b16-fix-crashloop]
+
+  - id: intermediate
+    title: Intermediate
+    summary: |
+      The building blocks of real applications: the right workload for each
+      job, storage, health checks, resources, access control, networking and
+      packaging.
+    modules:
+      - title: Workloads
+        summary: Jobs, CronJobs, DaemonSets and StatefulSets.
+        labs: [i01-job-parallel, i02-cronjob, i03-daemonset, i04-statefulset]
+      - title: Multi-container Pods
+        summary: Init containers and sidecars.
+        labs: [i05-init-container, i06-sidecar]
+      - title: Storage and configuration
+        summary: Persistent volumes and configuration files.
+        labs: [i07-pvc, i08-config-files, i09-config-secrets]
+      - title: Health and resources
+        summary: Probes, requests and limits, quotas and LimitRanges.
+        labs: [i10-probes, i11-fix-liveness, i12-quota, i13-limitrange]
+      - title: Access and security
+        summary: ServiceAccounts, RBAC and securityContext.
+        labs: [i14-rbac, i15-security-context]
+      - title: Networking
+        summary: Debug Services, restrict traffic, route HTTP.
+        labs: [i16-fix-service, i17-network-policy, i18-ingress]
+      - title: Scheduling
+        summary: Node selectors, taints and tolerations.
+        labs: [i19-scheduling]
+      - title: Packaging and updates
+        summary: Rolling update settings, Helm and Kustomize.
+        labs: [i20-update-strategy, i21-helm, i22-kustomize]
+
+  - id: advanced
+    title: Advanced
+    summary: |
+      What production teams do every week: safe releases, custom images and
+      APIs, debugging hard cases, autoscaling and hardening.
+    modules:
+      - title: Release strategies
+        summary: Canary and blue/green releases with plain Kubernetes objects.
+        labs: [a01-canary, a02-blue-green]
+      - title: Build and extend
+        summary: Build images, use custom resources, survive API removals.
+        labs: [a03-build-image, a04-crd, a05-deprecated-api]
+      - title: Observability and debugging
+        summary: Logs, metrics, ephemeral containers and autoscaling.
+        labs: [a06-debug-crash, a07-top, a08-kubectl-debug, a09-hpa]
+      - title: Hardening
+        summary: Pod Security, default-deny networking and API access from Pods.
+        labs: [a10-pod-security, a11-default-deny, a12-api-from-pod]
+
+  - id: scenarios
+    title: Real-life scenarios
+    summary: |
+      Longer exercises that combine many topics, the way work arrives in real
+      life: a launch, an outage, a traffic spike, an audit, a bad release,
+      maintenance and a memory problem.
+    modules:
+      - title: Build and launch
+        summary: Put a complete application into production.
+        labs: [s01-launch-shop]
+      - title: Incidents
+        summary: Find and fix the problems under pressure.
+        labs: [s02-checkout-outage, s05-bad-release, s07-oom]
+      - title: Operations
+        summary: Scale, secure and maintain what runs.
+        labs: [s03-traffic-spike, s04-security-audit, s06-node-maintenance]
+
+tracks:
+  - id: ckad
+    title: CKAD
+    summary: |
+      Certified Kubernetes Application Developer. The labs from the learning
+      path grouped by the five domains of the CKAD curriculum, the exam
+      workflow, and timed mock exams with automatic scoring.
+    sections:
+      - title: Application Design and Build
+        weight: 20
+        summary: Images, workload types, multi-container Pods, volumes.
+        labs: [b03-pod-from-yaml, i01-job-parallel, i02-cronjob, i03-daemonset, i04-statefulset, i05-init-container, i06-sidecar, i07-pvc, a03-build-image]
+      - title: Application Deployment
+        weight: 20
+        summary: Rolling updates, blue/green and canary, Helm, Kustomize.
+        labs: [b07-deployment, b09-rolling-update, b10-rollback, i20-update-strategy, i21-helm, i22-kustomize, a01-canary, a02-blue-green, s05-bad-release]
+      - title: Application Observability and Maintenance
+        weight: 15
+        summary: API deprecations, probes, monitoring, logs, debugging.
+        labs: [b04-inspect-pod, b16-fix-crashloop, i10-probes, i11-fix-liveness, a05-deprecated-api, a06-debug-crash, a07-top, a08-kubectl-debug, s02-checkout-outage, s07-oom]
+      - title: Application Environment, Configuration and Security
+        weight: 25
+        summary: CRDs, RBAC and ServiceAccounts, resources and quotas, ConfigMaps, Secrets, securityContext.
+        labs: [b13-configmap-env, b14-secret-env, i08-config-files, i09-config-secrets, i12-quota, i13-limitrange, i14-rbac, i15-security-context, a04-crd, a10-pod-security, a12-api-from-pod, s04-security-audit]
+      - title: Services and Networking
+        weight: 20
+        summary: NetworkPolicies, Services, Ingress.
+        labs: [b11-service, b12-service-dns, i16-fix-service, i17-network-policy, i18-ingress, a11-default-deny, s01-launch-shop]
+      - title: Exam skills
+        summary: Work fast in the exam environment.
+        labs: [c01-exam-workflow, c02-speed-drills]
+    exams: [ckad-mock-1, ckad-mock-2]

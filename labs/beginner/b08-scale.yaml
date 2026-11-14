@@ -1,0 +1,43 @@
+id: b08-scale
+title: Scale a Deployment
+level: beginner
+minutes: 5
+tracks: [kcna, ckad, cka]
+topic: Deployments
+intro: |
+  A Deployment named `shop` is already running with 2 replicas. Traffic is
+  growing and you need more copies.
+
+  Scaling changes spec.replicas. The ReplicaSet then creates or removes
+  Pods to match. You can scale with `kubectl scale`, or by editing the
+  replicas field in the manifest and applying it again.
+setup:
+  - kubectl create deployment shop --image=nginx:1.27 --replicas=2
+tasks:
+  - Scale the Deployment `shop` to 5 replicas.
+  - Confirm that 5 Pods are Running.
+checks:
+  - name: Deployment shop wants 5 replicas
+    kind: Deployment
+    resource: shop
+    path: .spec.replicas
+    equals: 5
+  - name: 5 replicas are ready
+    kind: Deployment
+    resource: shop
+    path: .status.readyReplicas
+    equals: 5
+  - name: There are exactly 5 shop Pods
+    kind: Pod
+    count:
+      selector: app=shop
+      equals: 5
+hints:
+  - "kubectl scale needs the resource and a --replicas flag."
+  - "kubectl scale deployment shop --replicas=5"
+solution:
+  - kubectl scale deployment shop --replicas=5
+learned: |
+  Scaling down works the same way. The ReplicaSet removes Pods that are not
+  ready first, then the newest ones. Later you will meet the
+  HorizontalPodAutoscaler, which changes replicas for you based on load.

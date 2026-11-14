@@ -1,0 +1,775 @@
+id: ckad-mock-2
+title: CKAD mock exam 2
+track: ckad
+minutes: 120
+passPercent: 66
+intro: |
+  A second full practice run: 16 new tasks, 120 minutes, 66% to pass. As in
+  the real exam, each task names the host to work on: connect with ssh HOST,
+  solve it there, and type exit before moving on. Partial credit is given per
+  check. The questions are original practice material written for PodSim,
+  mapped to the public CKAD curriculum.
+tasks:
+  - host: ckad00031
+    weight: 7
+    domain: Application Design and Build
+    title: Indexed Job
+    text: |
+      Create a Job named `shards` in the namespace `batch` that runs 4
+      completions, 2 at a time, in Indexed completion mode. Its Pods use the
+      image `busybox:1.36` and run `sh -c 'echo processing shard $JOB_COMPLETION_INDEX'`.
+      Let the Job finish.
+    setup:
+      - kubectl create namespace batch
+    checks:
+      - name: shards uses Indexed completion mode
+        kind: Job
+        namespace: batch
+        resource: shards
+        path: .spec.completionMode
+        equals: Indexed
+      - name: shards runs 2 Pods at a time
+        kind: Job
+        namespace: batch
+        resource: shards
+        path: .spec.parallelism
+        equals: 2
+      - name: All 4 completions succeeded
+        kind: Job
+        namespace: batch
+        resource: shards
+        path: .status.succeeded
+        equals: 4
+    solution:
+      - |
+        cat <<'EOF' | kubectl apply -f -
+        apiVersion: batch/v1
+        kind: Job
+        metadata:
+          name: shards
+          namespace: batch
+        spec:
+          completions: 4
+          parallelism: 2
+          completionMode: Indexed
+          template:
+            spec:
+              restartPolicy: Never
+              containers:
+              - name: shard
+                image: busybox:1.36
+                command: ["sh", "-c", "echo processing shard $JOB_COMPLETION_INDEX"]
+        EOF
+      - sleep 30
+
+  - host: ckad00032
+    weight: 6
+    domain: Application Design and Build
+    title: StatefulSet with per-replica storage
+    text: |
+      Create a headless Service `kv` (port 6379, selector `app=kv`) and a
+      StatefulSet `kv` with 2 replicas, `serviceName` `kv`, Pod label
+      `app=kv` and the image `redis:7`. Each replica gets its own 512Mi
+      PersistentVolumeClaim from a template named `data`, mounted at `/data`.
+    checks:
+      - name: Service kv is headless
+        kind: Service
+        resource: kv
+        path: .spec.clusterIP
+        equals: None
+      - name: StatefulSet kv has 2 ready replicas
+        kind: StatefulSet
+        resource: kv
+        path: .status.readyReplicas
+        equals: 2
+      - name: data-kv-1 is Bound
+        kind: PersistentVolumeClaim
+        resource: data-kv-1
+        path: .status.phase
+        equals: Bound
+      - name: Claims request 512Mi
+        kind: PersistentVolumeClaim
+        resource: data-kv-0
+        path: .spec.resources.requests.storage
+        equals: 512Mi
+    solution:
+      - |
+        cat <<EOF | kubectl apply -f -
+        apiVersion: v1
+        kind: Service
+        metadata:
+          name: kv
+        spec:
+          clusterIP: None
+          selector:
+            app: kv
+          ports:
+          - port: 6379
+        ---
+        apiVersion: apps/v1
+        kind: StatefulSet
+        metadata:
+          name: kv
+        spec:
+          serviceName: kv
+          replicas: 2
+          selector:
+            matchLabels:
+              app: kv
+          template:
+            metadata:
+              labels:
+                app: kv
+            spec:
+              containers:
+              - name: redis
+                image: redis:7
+                volumeMounts:
+                - name: data
+                  mountPath: /data
+          volumeClaimTemplates:
+          - metadata:
+              name: data
+            spec:
+              accessModes: ["ReadWriteOnce"]
+              resources:
+                requests:
+                  storage: 512Mi
+        EOF
+      - sleep 40
+
+  - host: ckad00033
+    weight: 7
+    domain: Application Design and Build
+    title: Unblock an init container
+    text: |
+      The Pod `app` has been stuck in `Init:0/1` since it was deployed. Find
+      out what its init container waits for and provide it: create a
+      Deployment named `config-api` (image `nginx:1.29`) and whatever else is
+      needed so that `app` starts. Do not change or recreate `app`.
+    setup:
+      - |
+        cat <<EOF | kubectl apply -f -
+        apiVersion: v1
+        kind: Pod
+        metadata:
+          name: app
+        spec:
+          initContainers:
+          - name: wait-for-config
+            image: busybox:1.36
+            command: ["sh", "-c", "until nslookup config-api; do echo waiting for config-api; sleep 2; done"]
+          containers:
+          - name: app
+            image: busybox:1.36
+            command: ["sleep", "3600"]
+        EOF
+    checks:
+      - name: Deployment config-api is available
+        kind: Deployment
+        resource: config-api
+        path: .status.availableReplicas
+        equals: 1
+      - name: Service config-api exists
+        kind: Service
+        resource: config-api
+        expect: exists
+      - name: Pod app is Running
+        kind: Pod
+        resource: app
+        path: .status.phase
+        equals: Running
+    solution:
+      - kubectl create deployment config-api --image=nginx:1.29
+      - kubectl expose deployment config-api --port=80
+      - sleep 20
+
+  - host: ckad00034
+    weight: 7
+    domain: Application Deployment
+    title: Switch to the Recreate strategy
+    text: |
+      The app in the Deployment `legacy-api` cannot run two versions at the
+      same time. Change its update strategy to `Recreate`, then update the
+      container `legacy-api` to the image `nginx:1.29` and wait for the
+      rollout to finish.
+    setup:
+      - kubectl create deployment legacy-api --image=nginx:1.27 --replicas=2
+    checks:
+      - name: The strategy is Recreate
+        kind: Deployment
+        resource: legacy-api
+        path: .spec.strategy.type
+        equals: Recreate
+      - name: The image is nginx:1.29
+        kind: Deployment
+        resource: legacy-api
+        path: .spec.template.spec.containers[0].image
+        equals: nginx:1.29
+      - name: Both replicas run the new version
+        kind: Deployment
+        resource: legacy-api
+        path: .status.updatedReplicas
+        equals: 2
+    solution:
+      - "kubectl patch deployment legacy-api -p '{\"spec\":{\"strategy\":{\"type\":\"Recreate\",\"rollingUpdate\":null}}}'"
+      - kubectl set image deployment/legacy-api nginx=nginx:1.29
+      - kubectl rollout status deployment/legacy-api --timeout=120s
+
+  - host: ckad00035
+    weight: 6
+    domain: Application Deployment
+    title: Install a local Helm chart
+    text: |
+      The chart `webapp` in your home folder was created by the team. Render
+      its templates with the values below into `rendered.yaml`, then install
+      it as the release `webapp` in the new namespace `apps` with 2 replicas
+      (`replicaCount`) and a NodePort Service (`service.type`).
+    setup:
+      - helm create webapp
+    checks:
+      - name: rendered.yaml has the Deployment
+        command: "grep -c 'kind: Deployment' rendered.yaml"
+        outputMatches: "^1"
+      - name: Release webapp is deployed in apps
+        command: helm ls -n apps
+        outputMatches: "webapp\\s+apps\\s+1\\s+.*deployed"
+      - name: The Deployment has 2 ready replicas
+        kind: Deployment
+        namespace: apps
+        resource: webapp
+        path: .status.readyReplicas
+        equals: 2
+      - name: The Service is a NodePort
+        kind: Service
+        namespace: apps
+        resource: webapp
+        path: .spec.type
+        equals: NodePort
+    solution:
+      - helm template webapp ./webapp --set replicaCount=2 --set service.type=NodePort > rendered.yaml
+      - helm install webapp ./webapp -n apps --create-namespace --set replicaCount=2 --set service.type=NodePort
+      - sleep 20
+
+  - host: ckad00036
+    weight: 7
+    domain: Application Deployment
+    title: Kustomize overlay with a patch
+    text: |
+      The folder `svc/base` holds a Kustomize base for the Deployment `svc`.
+      Create an overlay in `svc/overlays/dev` that:
+
+      - adds the suffix `-dev` to every name
+      - sets the image `nginx` to the tag `1.29`
+      - patches the container `svc` with the environment variable
+        `LOG_LEVEL=debug` (strategic merge or JSON patch, your choice)
+
+      Apply the overlay to the namespace `default`.
+    files:
+      svc/base/kustomization.yaml: |
+        resources:
+        - deployment.yaml
+      svc/base/deployment.yaml: |
+        apiVersion: apps/v1
+        kind: Deployment
+        metadata:
+          name: svc
+        spec:
+          replicas: 1
+          selector:
+            matchLabels:
+              app: svc
+          template:
+            metadata:
+              labels:
+                app: svc
+            spec:
+              containers:
+              - name: svc
+                image: nginx:1.27
+    checks:
+      - name: Deployment svc-dev exists
+        kind: Deployment
+        resource: svc-dev
+        path: .status.availableReplicas
+        equals: 1
+      - name: svc-dev uses nginx:1.29
+        kind: Deployment
+        resource: svc-dev
+        path: .spec.template.spec.containers[0].image
+        equals: nginx:1.29
+      - name: LOG_LEVEL is debug
+        command: kubectl exec deploy/svc-dev -- printenv LOG_LEVEL
+        outputMatches: "^debug"
+    solution:
+      - |
+        mkdir -p svc/overlays/dev
+        cat <<EOF > svc/overlays/dev/kustomization.yaml
+        resources:
+        - ../../base
+        nameSuffix: -dev
+        images:
+        - name: nginx
+          newTag: "1.29"
+        patches:
+        - target:
+            kind: Deployment
+            name: svc
+          patch: |-
+            - op: add
+              path: /spec/template/spec/containers/0/env
+              value:
+              - name: LOG_LEVEL
+                value: debug
+        EOF
+      - kubectl apply -k svc/overlays/dev
+      - sleep 15
+
+  - host: ckad00037
+    weight: 5
+    domain: Application Observability and Maintenance
+    title: Exec readiness probe
+    text: |
+      The Deployment `warmup` creates the file `/tmp/ready` once it has
+      loaded its cache. Add a readiness probe to its container that runs
+      `cat /tmp/ready`, starting after 5 seconds and repeating every 5
+      seconds. Make sure the rollout finishes.
+    setup:
+      - |
+        cat <<EOF | kubectl apply -f -
+        apiVersion: apps/v1
+        kind: Deployment
+        metadata:
+          name: warmup
+        spec:
+          replicas: 1
+          selector:
+            matchLabels:
+              app: warmup
+          template:
+            metadata:
+              labels:
+                app: warmup
+            spec:
+              containers:
+              - name: warmup
+                image: busybox:1.36
+                command: ["sh", "-c", "sleep 8; touch /tmp/ready; sleep 3600"]
+        EOF
+    checks:
+      - name: The probe runs cat /tmp/ready
+        kind: Deployment
+        resource: warmup
+        path: .spec.template.spec.containers[0].readinessProbe.exec.command
+        contains: /tmp/ready
+      - name: The probe repeats every 5 seconds
+        kind: Deployment
+        resource: warmup
+        path: .spec.template.spec.containers[0].readinessProbe.periodSeconds
+        equals: 5
+      - name: warmup is ready with the probe
+        kind: Deployment
+        resource: warmup
+        path: .status.updatedReplicas
+        equals: 1
+    solution:
+      - |
+        cat <<EOF > probe.yaml
+        spec:
+          template:
+            spec:
+              containers:
+              - name: warmup
+                readinessProbe:
+                  exec:
+                    command: ["cat", "/tmp/ready"]
+                  initialDelaySeconds: 5
+                  periodSeconds: 5
+        EOF
+      - kubectl patch deployment warmup --patch-file probe.yaml
+      - kubectl rollout status deployment/warmup --timeout=60s
+
+  - host: ckad00038
+    weight: 5
+    domain: Application Observability and Maintenance
+    title: Find the memory-hungry Pod
+    text: |
+      Several Pods run in the namespace `analytics`. Write the name of the
+      Pod that currently uses the most memory, and nothing else, to
+      `top-memory.txt` in your home folder.
+    setup:
+      - kubectl create namespace analytics
+      - kubectl run ingest -n analytics --image=busybox:1.36 -- sh -c 'while true; do sleep 5; done'
+      - kubectl run aggregate -n analytics --image=polinux/stress -- stress --vm 1 --vm-bytes 150M
+      - kubectl run dashboard -n analytics --image=nginx:1.29
+    settle: 30
+    checks:
+      - name: top-memory.txt names the busiest Pod
+        command: cat top-memory.txt
+        outputMatches: "^\\s*aggregate\\s*$"
+    solution:
+      - kubectl top pod -n analytics --sort-by=memory --no-headers | head -1 | cut -d' ' -f1 > top-memory.txt
+
+  - host: ckad00039
+    weight: 5
+    domain: Application Observability and Maintenance
+    title: Logs of the crashed instance
+    text: |
+      The container `worker` of the Pod `importer` crashed once and then
+      recovered. Write the log output of the instance that crashed, and
+      nothing from the current instance, to `crash.txt`.
+    setup:
+      - |
+        cat <<EOF | kubectl apply -f -
+        apiVersion: v1
+        kind: Pod
+        metadata:
+          name: importer
+        spec:
+          volumes:
+          - name: state
+            emptyDir: {}
+          containers:
+          - name: worker
+            image: busybox:1.36
+            command: ["sh", "-c", "if [ -f /state/tried ]; then echo recovered; sleep 3600; else touch /state/tried; echo 'FATAL: schema version mismatch (want 7, got 6)'; exit 1; fi"]
+            volumeMounts:
+            - name: state
+              mountPath: /state
+        EOF
+    settle: 30
+    checks:
+      - name: crash.txt has the fatal error
+        command: cat crash.txt
+        outputMatches: "FATAL: schema version mismatch"
+      - name: crash.txt has nothing from the current instance
+        command: grep -c recovered crash.txt
+        outputMatches: "^0"
+    solution:
+      - kubectl logs importer -c worker --previous > crash.txt
+
+  - host: ckad00040
+    weight: 6
+    domain: Application Environment, Configuration and Security
+    title: ConfigMap from an env file
+    text: |
+      Create a ConfigMap `app-env` from the env file `app.env` in your home
+      folder (one key per line). Then create a Pod `reader` (image
+      `busybox:1.36`, command `sleep 3600`) that mounts the ConfigMap at
+      `/etc/app` and also gets the key `REGION` as the environment variable
+      `APP_REGION`.
+    files:
+      app.env: |
+        REGION=eu-west-1
+        RETRIES=3
+    checks:
+      - name: app-env has REGION
+        kind: ConfigMap
+        resource: app-env
+        path: .data.REGION
+        equals: eu-west-1
+      - name: The ConfigMap is mounted at /etc/app
+        command: kubectl exec reader -- cat /etc/app/RETRIES
+        outputMatches: "^3"
+      - name: APP_REGION is set
+        command: kubectl exec reader -- printenv APP_REGION
+        outputMatches: "^eu-west-1"
+    solution:
+      - kubectl create configmap app-env --from-env-file=app.env
+      - |
+        cat <<EOF | kubectl apply -f -
+        apiVersion: v1
+        kind: Pod
+        metadata:
+          name: reader
+        spec:
+          volumes:
+          - name: env
+            configMap:
+              name: app-env
+          containers:
+          - name: reader
+            image: busybox:1.36
+            command: ["sleep", "3600"]
+            env:
+            - name: APP_REGION
+              valueFrom:
+                configMapKeyRef:
+                  name: app-env
+                  key: REGION
+            volumeMounts:
+            - name: env
+              mountPath: /etc/app
+        EOF
+      - sleep 10
+
+  - host: ckad00041
+    weight: 6
+    domain: Application Environment, Configuration and Security
+    title: TLS Secret for an Ingress
+    text: |
+      Create a TLS Secret named `portal-tls` from the files `tls.crt` and
+      `tls.key` in your home folder. Then update the existing Ingress
+      `portal` so that it serves the host `portal.local` over TLS with that
+      Secret.
+    files:
+      tls.crt: |
+        -----BEGIN CERTIFICATE-----
+        MIIBszCCAVmgAwIBAgIUQ3JhZnRlZEZvclBvZFNpbVByYWN0aWNlMAoGCCqGSM49
+        -----END CERTIFICATE-----
+      tls.key: |
+        -----BEGIN PRIVATE KEY-----
+        MIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQgUG9kU2ltUHJhY3Rp
+        -----END PRIVATE KEY-----
+    setup:
+      - kubectl create deployment portal --image=nginx:1.29
+      - kubectl expose deployment portal --port=80
+      - kubectl create ingress portal --class=nginx --rule='portal.local/*=portal:80'
+    checks:
+      - name: portal-tls is a TLS Secret
+        kind: Secret
+        resource: portal-tls
+        path: .type
+        equals: kubernetes.io/tls
+      - name: The Ingress uses portal-tls
+        kind: Ingress
+        resource: portal
+        path: .spec.tls[0].secretName
+        equals: portal-tls
+      - name: TLS covers portal.local
+        kind: Ingress
+        resource: portal
+        path: .spec.tls[0].hosts
+        contains: portal.local
+    solution:
+      - kubectl create secret tls portal-tls --cert=tls.crt --key=tls.key
+      - "kubectl patch ingress portal -p '{\"spec\":{\"tls\":[{\"hosts\":[\"portal.local\"],\"secretName\":\"portal-tls\"}]}}'"
+
+  - host: ckad00042
+    weight: 7
+    domain: Application Environment, Configuration and Security
+    title: Cluster-wide read, namespaced write
+    text: |
+      The ServiceAccount `ci-bot` in the namespace `cicd` needs to:
+
+      - get, list and watch Deployments in every namespace (ClusterRole
+        `deploy-viewer`, ClusterRoleBinding `ci-bot-deploy-viewer`)
+      - create and delete Pods only in `cicd` (Role `pod-manager`,
+        RoleBinding `ci-bot-pod-manager`)
+
+      Create the ServiceAccount and everything it needs.
+    setup:
+      - kubectl create namespace cicd
+    checks:
+      - name: ci-bot can list deployments in kube-system
+        command: kubectl auth can-i list deployments.apps -n kube-system --as=system:serviceaccount:cicd:ci-bot
+        outputMatches: "^yes"
+      - name: ci-bot can create pods in cicd
+        command: kubectl auth can-i create pods -n cicd --as=system:serviceaccount:cicd:ci-bot
+        outputMatches: "^yes"
+      - name: ci-bot cannot create pods in default
+        command: kubectl auth can-i create pods -n default --as=system:serviceaccount:cicd:ci-bot
+        outputMatches: "^no"
+      - name: ci-bot cannot delete deployments
+        command: kubectl auth can-i delete deployments.apps -n cicd --as=system:serviceaccount:cicd:ci-bot
+        outputMatches: "^no"
+    solution:
+      - kubectl create serviceaccount ci-bot -n cicd
+      - kubectl create clusterrole deploy-viewer --verb=get,list,watch --resource=deployments
+      - kubectl create clusterrolebinding ci-bot-deploy-viewer --clusterrole=deploy-viewer --serviceaccount=cicd:ci-bot
+      - kubectl create role pod-manager -n cicd --verb=create,delete --resource=pods
+      - kubectl create rolebinding ci-bot-pod-manager -n cicd --role=pod-manager --serviceaccount=cicd:ci-bot
+
+  - host: ckad00043
+    weight: 6
+    domain: Application Environment, Configuration and Security
+    title: Read-only root with a writable scratch space
+    text: |
+      Create a Pod `scratchpad` (image `busybox:1.36`, command `sleep 3600`)
+      whose container has a read-only root filesystem and runs as user 2000.
+      The app needs to write temporary files to `/tmp`, so give it an
+      `emptyDir` volume there.
+    checks:
+      - name: The root filesystem is read-only
+        command: kubectl exec scratchpad -- touch /root-test
+        outputMatches: Read-only file system
+      - name: /tmp is writable
+        command: kubectl exec scratchpad -- touch /tmp/ok
+        exitCode: 0
+      - name: The container runs as user 2000
+        command: kubectl exec scratchpad -- id -u
+        outputMatches: "^2000"
+    solution:
+      - |
+        cat <<EOF | kubectl apply -f -
+        apiVersion: v1
+        kind: Pod
+        metadata:
+          name: scratchpad
+        spec:
+          volumes:
+          - name: tmp
+            emptyDir: {}
+          containers:
+          - name: scratchpad
+            image: busybox:1.36
+            command: ["sleep", "3600"]
+            securityContext:
+              runAsUser: 2000
+              readOnlyRootFilesystem: true
+            volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+        EOF
+      - sleep 10
+
+  - host: ckad00044
+    weight: 7
+    domain: Services and Networking
+    title: Allow traffic from one namespace
+    text: |
+      The cache `redis` in the namespace `data` (label `app=redis`, Service
+      `redis` on 6379) must only accept connections from Pods in namespaces
+      labeled `team=backend`. The namespace `backend` already has that label.
+
+      Create a NetworkPolicy `redis-from-backend` in `data` that does this.
+    setup:
+      - kubectl create namespace data
+      - kubectl create namespace backend
+      - kubectl create namespace marketing
+      - kubectl label namespace backend team=backend
+      - kubectl run redis -n data --image=redis:7 -l app=redis --port=6379 --expose
+      - kubectl run client -n backend --image=busybox:1.36 -- sleep 3600
+      - kubectl run client -n marketing --image=busybox:1.36 -- sleep 3600
+    checks:
+      - name: The policy selects app=redis
+        kind: NetworkPolicy
+        namespace: data
+        resource: redis-from-backend
+        path: .spec.podSelector.matchLabels.app
+        equals: redis
+      - name: backend can reach redis
+        command: kubectl exec -n backend client -- nc -z -w 2 redis.data 6379
+        exitCode: 0
+      - name: marketing cannot reach redis
+        command: kubectl exec -n marketing client -- nc -z -w 2 redis.data 6379
+        exitCode: 1
+    solution:
+      - |
+        cat <<EOF | kubectl apply -f -
+        apiVersion: networking.k8s.io/v1
+        kind: NetworkPolicy
+        metadata:
+          name: redis-from-backend
+          namespace: data
+        spec:
+          podSelector:
+            matchLabels:
+              app: redis
+          policyTypes: ["Ingress"]
+          ingress:
+          - from:
+            - namespaceSelector:
+                matchLabels:
+                  team: backend
+            ports:
+            - protocol: TCP
+              port: 6379
+        EOF
+
+  - host: ckad00045
+    weight: 7
+    domain: Services and Networking
+    title: Ingress with a default backend
+    text: |
+      Create an Ingress `api-gw` (class `nginx`) for the host `api.local`:
+      `/orders` (prefix) goes to the Service `orders`, `/users` (prefix) to
+      `users`, and every other request to the Service `fallback`. All three
+      Services listen on port 80.
+
+      The ingress controller listens on NodePort 30080 of every node.
+    setup:
+      - kubectl create deployment orders --image=hashicorp/http-echo:1.0 -- /http-echo -text=orders -listen=:5678
+      - kubectl expose deployment orders --port=80 --target-port=5678
+      - kubectl create deployment users --image=hashicorp/http-echo:1.0 -- /http-echo -text=users -listen=:5678
+      - kubectl expose deployment users --port=80 --target-port=5678
+      - kubectl create deployment fallback --image=hashicorp/http-echo:1.0 -- /http-echo -text=no-such-api -listen=:5678
+      - kubectl expose deployment fallback --port=80 --target-port=5678
+    checks:
+      - name: /orders reaches orders
+        command: "curl -s -H 'Host: api.local' http://node01:30080/orders/42"
+        outputMatches: "^orders"
+      - name: /users reaches users
+        command: "curl -s -H 'Host: api.local' http://node01:30080/users"
+        outputMatches: "^users"
+      - name: Other paths reach the fallback
+        command: "curl -s -H 'Host: api.local' http://node01:30080/payments"
+        outputMatches: "^no-such-api"
+    solution:
+      - kubectl create ingress api-gw --class=nginx --rule='api.local/orders*=orders:80' --rule='api.local/users*=users:80' --default-backend=fallback:80
+      - sleep 10
+
+  - host: ckad00046
+    weight: 6
+    domain: Services and Networking
+    title: NodePort on a fixed port
+    text: |
+      The Deployment `exporter` publishes metrics on a container port named
+      `metrics`. Create a Service `exporter` of type NodePort that exposes it
+      on port 9100 inside the cluster and on node port 30100 on every node,
+      targeting the named port.
+    setup:
+      - |
+        cat <<EOF | kubectl apply -f -
+        apiVersion: apps/v1
+        kind: Deployment
+        metadata:
+          name: exporter
+        spec:
+          replicas: 1
+          selector:
+            matchLabels:
+              app: exporter
+          template:
+            metadata:
+              labels:
+                app: exporter
+            spec:
+              containers:
+              - name: exporter
+                image: hashicorp/http-echo:1.0
+                args: ["-text=node_load1 0.42", "-listen=:9100"]
+                ports:
+                - name: metrics
+                  containerPort: 9100
+        EOF
+    checks:
+      - name: exporter targets the port named metrics
+        kind: Service
+        resource: exporter
+        path: .spec.ports[0].targetPort
+        equals: metrics
+      - name: The node port is 30100
+        kind: Service
+        resource: exporter
+        path: .spec.ports[0].nodePort
+        equals: 30100
+      - name: The node port answers
+        command: curl -s http://node02:30100
+        outputMatches: node_load1
+    solution:
+      - |
+        cat <<EOF | kubectl apply -f -
+        apiVersion: v1
+        kind: Service
+        metadata:
+          name: exporter
+        spec:
+          type: NodePort
+          selector:
+            app: exporter
+          ports:
+          - port: 9100
+            targetPort: metrics
+            nodePort: 30100
+        EOF

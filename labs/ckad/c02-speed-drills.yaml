@@ -1,0 +1,114 @@
+id: c02-speed-drills
+title: "Speed drill: ten objects in ten minutes"
+level: advanced
+minutes: 10
+tracks: [ckad, cka]
+topic: Exam skills
+intro: |
+  Most CKAD objects can be created with one imperative command. Typing them
+  without looking things up saves the time you need for the hard tasks.
+
+  Do all of these in the namespace `drill` (it exists). Set it on your
+  context first. Time yourself: the goal is under ten minutes.
+setup:
+  - kubectl create namespace drill
+tasks:
+  - Pod `p1`, image `nginx:1.29`, labels `app=p1` and `tier=web`.
+  - Deployment `d1`, image `httpd:2.4`, 3 replicas.
+  - Service `d1` of type ClusterIP on port 8080 that targets port 80 of `d1`.
+  - ConfigMap `cm1` with `a=1` and `b=2`.
+  - Secret `s1` (generic) with `user=admin`.
+  - Job `j1`, image `busybox:1.36`, command `echo done`.
+  - CronJob `cj1` that runs every 5 minutes, image `busybox:1.36`, command `date`.
+  - ServiceAccount `sa1`.
+  - Role `r1` that can get and list pods, and a RoleBinding `rb1` that gives it to `sa1`.
+  - Pod `p2`, image `busybox:1.36`, command `sleep 3600`, requesting 50m CPU and 32Mi memory.
+checks:
+  - name: p1 has app=p1 and tier=web
+    kind: Pod
+    namespace: drill
+    resource: p1
+    path: .metadata.labels.tier
+    equals: web
+  - name: d1 has 3 ready replicas
+    kind: Deployment
+    namespace: drill
+    resource: d1
+    path: .status.readyReplicas
+    equals: 3
+  - name: Service d1 maps 8080 to 80
+    kind: Service
+    namespace: drill
+    resource: d1
+    path: .spec.ports[0].targetPort
+    equals: 80
+  - name: cm1 has b=2
+    kind: ConfigMap
+    namespace: drill
+    resource: cm1
+    path: .data.b
+    equals: "2"
+  - name: s1 has user=admin
+    kind: Secret
+    namespace: drill
+    resource: s1
+    path: .data.user
+    equals: YWRtaW4=
+  - name: j1 completed
+    kind: Job
+    namespace: drill
+    resource: j1
+    path: .status.succeeded
+    equals: 1
+  - name: cj1 runs every 5 minutes
+    kind: CronJob
+    namespace: drill
+    resource: cj1
+    path: .spec.schedule
+    equals: "*/5 * * * *"
+  - name: sa1 can list pods in drill
+    command: kubectl auth can-i list pods -n drill --as=system:serviceaccount:drill:sa1
+    outputMatches: "^yes"
+  - name: p2 requests 32Mi memory
+    kind: Pod
+    namespace: drill
+    resource: p2
+    path: .spec.containers[0].resources.requests.memory
+    equals: 32Mi
+hints:
+  - "kubectl run p1 --image=nginx:1.29 -l app=p1,tier=web; kubectl create deployment d1 --image=httpd:2.4 --replicas=3; kubectl expose deployment d1 --port=8080 --target-port=80"
+  - "kubectl create job j1 --image=busybox:1.36 -- echo done; kubectl create cronjob cj1 --image=busybox:1.36 --schedule='*/5 * * * *' -- date"
+  - "kubectl create role r1 --verb=get,list --resource=pods; kubectl create rolebinding rb1 --role=r1 --serviceaccount=drill:sa1. For p2, generate YAML with --dry-run=client -o yaml and add resources.requests."
+solution:
+  - kubectl config set-context --current --namespace=drill
+  - kubectl run p1 --image=nginx:1.29 -l app=p1,tier=web
+  - kubectl create deployment d1 --image=httpd:2.4 --replicas=3
+  - kubectl expose deployment d1 --port=8080 --target-port=80
+  - kubectl create configmap cm1 --from-literal=a=1 --from-literal=b=2
+  - kubectl create secret generic s1 --from-literal=user=admin
+  - kubectl create job j1 --image=busybox:1.36 -- echo done
+  - kubectl create cronjob cj1 --image=busybox:1.36 --schedule='*/5 * * * *' -- date
+  - kubectl create serviceaccount sa1
+  - kubectl create role r1 --verb=get,list --resource=pods
+  - kubectl create rolebinding rb1 --role=r1 --serviceaccount=drill:sa1
+  - |
+    cat <<EOF | kubectl apply -f -
+    apiVersion: v1
+    kind: Pod
+    metadata:
+      name: p2
+    spec:
+      containers:
+      - name: p2
+        image: busybox:1.36
+        command: ["sleep", "3600"]
+        resources:
+          requests:
+            cpu: 50m
+            memory: 32Mi
+    EOF
+  - sleep 15
+learned: |
+  Repeat this drill until it takes under ten minutes. The commands that save
+  the most time in the exam are kubectl create (with --dry-run=client -o yaml
+  when you need to add fields), kubectl expose and kubectl set.

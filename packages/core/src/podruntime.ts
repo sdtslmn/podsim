@@ -887,7 +887,7 @@ export interface Target {
 }
 
 /** Resolve a hostname the way cluster DNS would from a pod in `ns`. */
-export function resolveHost(cluster: Cluster, ns: string, host: string): Target | undefined {
+export function resolveHost(cluster: Cluster, ns: string, host: string, depth = 0): Target | undefined {
   const h = host.toLowerCase().replace(/\.$/, "");
   if (/^\d+\.\d+\.\d+\.\d+$/.test(h)) {
     const svc = cluster.list("Service").find((s) => s.spec?.clusterIP === h);
@@ -920,7 +920,15 @@ export function resolveHost(cluster: Cluster, ns: string, host: string): Target 
   if (!svcName) return undefined;
   const svc = cluster.get("Service", svcName, svcNs);
   if (!svc || !cluster.get("Namespace", svcNs)) return undefined;
-  if (svc.spec?.type === "ExternalName") return { ip: "", fqdn: svc.spec.externalName, service: svc };
+  if (svc.spec?.type === "ExternalName") {
+    // A CNAME: follow it when it points at another Service in the cluster.
+    const target = String(svc.spec.externalName ?? "").toLowerCase().replace(/\.$/, "");
+    if (target.endsWith(".svc.cluster.local") && depth < 5) {
+      const next = resolveHost(cluster, ns, target, depth + 1);
+      if (next) return { ...next, fqdn: next.fqdn ?? target };
+    }
+    return { ip: "", fqdn: svc.spec.externalName, service: svc };
+  }
   if (svc.spec?.clusterIP === "None") {
     const pod = cluster.list("Pod", svcNs).find((p) => matchMap(p.metadata.labels, svc.spec.selector) && p.status?.podIP && isReady(p));
     return { ip: pod?.status?.podIP ?? "", fqdn: `${svcName}.${svcNs}.svc.cluster.local`, service: svc, pod };

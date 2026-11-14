@@ -6,7 +6,7 @@
 
 import type { Cluster } from "../cluster.js";
 import type { ContainerSpec, KObject } from "../types.js";
-import { execInContainer } from "../podruntime.js";
+import { execInContainer, imageInfo } from "../podruntime.js";
 
 export interface ExecResult {
   stdout: string;
@@ -28,6 +28,10 @@ export function runInContainer(cluster: Cluster, pod: KObject, c: ContainerSpec,
   if (argv.length === 0) return { stdout: "", stderr: "error: you must specify at least one command for the container", exitCode: 1 };
   const cs = cluster.podSims.get(pod.metadata.uid!)?.containers[c.name];
   if (!cs) return { stdout: "", stderr: `error: unable to upgrade connection: container not found ("${c.name}")`, exitCode: 1 };
+  // Images without a shell (scratch and distroless images) cannot run sh, bash or ash.
+  const tools = imageInfo(c.image)?.tools;
+  const bin = argv[0].replace(/^.*\//, "");
+  if (tools && ["sh", "bash", "ash"].includes(bin) && !tools.includes(bin) && !(bin === "sh" && tools.includes("bash"))) return notFound(argv[0]);
   const r = execInContainer(cluster, pod, c, cs, argv, stdin);
   // A command that is not in the image fails before any shell runs.
   if (r.code === 127 && r.stderr === `sh: ${argv[0].replace(/^.*\//, "")}: not found\n` && !argv[0].includes(" ")) return notFound(argv[0]);

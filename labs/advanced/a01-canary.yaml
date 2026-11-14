@@ -1,0 +1,103 @@
+id: a01-canary
+title: Send a share of traffic to a canary
+level: advanced
+minutes: 10
+tracks: [ckad]
+topic: Release strategies
+intro: |
+  The shop runs 3 replicas of version 1 behind the Service `shop`, which
+  selects Pods with the label `app=shop`. A canary release sends a small
+  share of traffic to the new version by running a few Pods with the same
+  `app` label next to the old ones.
+
+  With 3 old Pods and 1 new Pod, about a quarter of the requests reach the
+  new version.
+setup:
+  - |
+    cat <<EOF | kubectl apply -f -
+    apiVersion: apps/v1
+    kind: Deployment
+    metadata:
+      name: shop-v1
+    spec:
+      replicas: 3
+      selector:
+        matchLabels:
+          app: shop
+          version: v1
+      template:
+        metadata:
+          labels:
+            app: shop
+            version: v1
+        spec:
+          containers:
+          - name: shop
+            image: hashicorp/http-echo:1.0
+            args: ["-text=v1", "-listen=:8080"]
+    ---
+    apiVersion: v1
+    kind: Service
+    metadata:
+      name: shop
+    spec:
+      selector:
+        app: shop
+      ports:
+      - port: 80
+        targetPort: 8080
+    EOF
+tasks:
+  - Create a Deployment named `shop-v2` with 1 replica, labels `app=shop` and `version=v2` on its Pods, the image `hashicorp/http-echo:1.0` and the args `-text=v2` and `-listen=:8080`.
+  - Do not change `shop-v1` or the Service. The Service must then route to 4 Pods.
+checks:
+  - name: shop-v2 has 1 ready replica
+    kind: Deployment
+    resource: shop-v2
+    path: .status.readyReplicas
+    equals: 1
+  - name: shop-v2 Pods carry app=shop
+    kind: Deployment
+    resource: shop-v2
+    path: .spec.template.metadata.labels.app
+    equals: shop
+  - name: shop-v1 still runs 3 replicas
+    kind: Deployment
+    resource: shop-v1
+    path: .status.readyReplicas
+    equals: 3
+  - name: The Service shop has 4 endpoints
+    command: kubectl get endpoints shop -o jsonpath='{.subsets[*].addresses[*].ip}' | wc -w
+    outputMatches: "^\\s*4\\s*$"
+hints:
+  - "Copy the shop-v1 Deployment: kubectl get deploy shop-v1 -o yaml > v2.yaml, then change name, replicas, version labels (selector and template) and the text."
+  - "The selector of shop-v2 must include version: v2 so the two Deployments do not fight over the same Pods."
+solution:
+  - |
+    cat <<EOF | kubectl apply -f -
+    apiVersion: apps/v1
+    kind: Deployment
+    metadata:
+      name: shop-v2
+    spec:
+      replicas: 1
+      selector:
+        matchLabels:
+          app: shop
+          version: v2
+      template:
+        metadata:
+          labels:
+            app: shop
+            version: v2
+        spec:
+          containers:
+          - name: shop
+            image: hashicorp/http-echo:1.0
+            args: ["-text=v2", "-listen=:8080"]
+    EOF
+  - kubectl rollout status deployment/shop-v2 --timeout=60s
+learned: |
+  A Service sends traffic to every ready Pod its selector matches, so the
+  replica counts set the traffic split. Promote the canary by scaling v2 up
+  and v1 down; roll back by deleting shop-v2.

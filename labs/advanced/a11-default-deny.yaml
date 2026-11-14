@@ -1,0 +1,119 @@
+id: a11-default-deny
+title: Lock down a namespace with default-deny policies
+level: advanced
+minutes: 15
+tracks: [ckad, cks]
+topic: Hardening
+intro: |
+  A common baseline is to deny all traffic in a namespace, then allow only
+  what each app needs. Once egress is denied too, remember DNS: Pods look up
+  Service names through CoreDNS in kube-system on port 53, and that needs an
+  egress rule of its own.
+
+  In the namespace `shop`, `frontend` calls the Service `api`. The Pod
+  `intruder` should not reach anything.
+setup:
+  - kubectl create namespace shop
+  - kubectl label namespace kube-system name=kube-system --overwrite
+  - kubectl create deployment api -n shop --image=hashicorp/http-echo:1.0 -- /http-echo -text=api-ok -listen=:5678
+  - kubectl expose deployment api -n shop --port=80 --target-port=5678
+  - kubectl run frontend -n shop --image=busybox:1.36 -l app=frontend -- sleep 3600
+  - kubectl run intruder -n shop --image=busybox:1.36 -l app=intruder -- sleep 3600
+tasks:
+  - Create a NetworkPolicy named `default-deny` in `shop` that denies all ingress and egress for every Pod.
+  - Create a NetworkPolicy named `allow-dns` that lets every Pod in `shop` send DNS queries (UDP and TCP 53) to Pods in `kube-system`.
+  - Create a NetworkPolicy named `frontend-to-api` (or two, your choice) so that `frontend` can reach `api` on TCP 5678.
+checks:
+  - name: default-deny covers ingress and egress
+    kind: NetworkPolicy
+    namespace: shop
+    resource: default-deny
+    path: .spec.policyTypes
+    contains: Egress
+  - name: frontend reaches http://api
+    command: kubectl exec -n shop frontend -- wget -qO- -T 2 http://api
+    outputMatches: api-ok
+  - name: intruder cannot reach api
+    command: kubectl exec -n shop intruder -- wget -qO- -T 2 http://api
+    exitCode: 1
+  - name: frontend cannot reach the internet
+    command: kubectl exec -n shop frontend -- wget -qO- -T 2 http://example.com
+    exitCode: 1
+hints:
+  - "default-deny: podSelector: {} and policyTypes: [Ingress, Egress] with no rules."
+  - "allow-dns: egress to namespaceSelector matchLabels name: kube-system, ports 53 UDP and TCP."
+  - "frontend needs egress to app=api on 5678, and api needs ingress from app=frontend on 5678. One policy can hold both if its podSelector is empty, or write two."
+solution:
+  - |
+    cat <<EOF | kubectl apply -f -
+    apiVersion: networking.k8s.io/v1
+    kind: NetworkPolicy
+    metadata:
+      name: default-deny
+      namespace: shop
+    spec:
+      podSelector: {}
+      policyTypes: ["Ingress", "Egress"]
+    ---
+    apiVersion: networking.k8s.io/v1
+    kind: NetworkPolicy
+    metadata:
+      name: allow-dns
+      namespace: shop
+    spec:
+      podSelector: {}
+      policyTypes: ["Egress"]
+      egress:
+      - to:
+        - namespaceSelector:
+            matchLabels:
+              name: kube-system
+        ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+    ---
+    apiVersion: networking.k8s.io/v1
+    kind: NetworkPolicy
+    metadata:
+      name: frontend-to-api
+      namespace: shop
+    spec:
+      podSelector:
+        matchLabels:
+          app: frontend
+      policyTypes: ["Egress"]
+      egress:
+      - to:
+        - podSelector:
+            matchLabels:
+              app: api
+        ports:
+        - protocol: TCP
+          port: 5678
+    ---
+    apiVersion: networking.k8s.io/v1
+    kind: NetworkPolicy
+    metadata:
+      name: api-from-frontend
+      namespace: shop
+    spec:
+      podSelector:
+        matchLabels:
+          app: api
+      policyTypes: ["Ingress"]
+      ingress:
+      - from:
+        - podSelector:
+            matchLabels:
+              app: frontend
+        ports:
+        - protocol: TCP
+          port: 5678
+    EOF
+learned: |
+  The Service listens on 80 but policies see the Pod port (5678), because
+  traffic is translated to the Pod before policies apply. Namespaces carry
+  the label kubernetes.io/metadata.name automatically, which you can also
+  use in namespaceSelectors.

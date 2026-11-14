@@ -1,16 +1,28 @@
 # Writing labs
 
-A lab is one YAML file in `labs/<level>/`. The file name should start with the lab number, for example `labs/beginner/11-pending-pod.yaml`.
+A lab is one YAML file in `labs/<level>/` (`beginner`, `intermediate`, `advanced`, `scenarios`, or `ckad` for exam skills). The id starts with a level letter and a number, and the file has the same name: `labs/intermediate/i23-pending-pod.yaml`. The letter and number are the code learners type (`lab i23`).
+
+| Folder | Letter | Level value |
+|---|---|---|
+| `beginner/` | b | `beginner` |
+| `intermediate/` | i | `intermediate` |
+| `advanced/` | a | `advanced` |
+| `scenarios/` | s | `scenario` |
+| `ckad/` (exam skills) | c | `advanced` |
+
+Then add the id to [`labs/curriculum.yaml`](../labs/curriculum.yaml): under a module of its level in the learning path, and under the matching domain of a certification track if it fits one. `npm run validate-labs` fails if a lab is missing from the curriculum or the curriculum names a lab that does not exist.
+
+Real-life scenarios are longer labs that combine several topics and usually start from a broken or incomplete setup. Write the intro as the situation someone would face at work, and give each part of the job its own task and its own checks, so learners can use `check` as a progress bar.
 
 ## A complete example
 
 ```yaml
-id: 11-pending-pod
+id: i23-pending-pod
 title: Fix a Pod stuck in Pending
-level: beginner          # beginner | intermediate | advanced
+level: intermediate      # beginner | intermediate | advanced | scenario
 minutes: 8               # rough time to finish
 tracks: [ckad, cka]      # kcna | ckad | cka | cks (informational)
-topic: Troubleshooting
+topic: Scheduling        # shown when the lab is not in the curriculum
 intro: |
   A short explanation of the concept and the scenario. Plain text.
   Use `backticks` for commands and names, they are highlighted.

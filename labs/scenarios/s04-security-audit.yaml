@@ -1,0 +1,133 @@
+id: s04-security-audit
+title: "Security audit: close the findings"
+level: scenario
+minutes: 25
+tracks: [ckad, cks]
+topic: Real-life scenarios
+intro: |
+  An external audit of the namespace `billing` came back with four findings.
+  You have until tomorrow to close them:
+
+  1. The Deployment `invoice` runs a privileged container as root.
+  2. The ServiceAccount `invoice` is bound to `cluster-admin` through the
+     ClusterRoleBinding `invoice-admin`. The app only reads the ConfigMap
+     `invoice-config` in its own namespace.
+  3. Every `invoice` Pod mounts an API token, even though nothing in the Pod
+     needs to call the API.
+  4. Nothing stops the next privileged Pod from being deployed.
+setup:
+  - kubectl create namespace billing
+  - kubectl create configmap invoice-config -n billing --from-literal=TAX_RATE=0.19
+  - kubectl create serviceaccount invoice -n billing
+  - kubectl create clusterrolebinding invoice-admin --clusterrole=cluster-admin --serviceaccount=billing:invoice
+  - |
+    cat <<EOF | kubectl apply -f -
+    apiVersion: apps/v1
+    kind: Deployment
+    metadata:
+      name: invoice
+      namespace: billing
+    spec:
+      replicas: 1
+      selector:
+        matchLabels:
+          app: invoice
+      template:
+        metadata:
+          labels:
+            app: invoice
+        spec:
+          serviceAccountName: invoice
+          containers:
+          - name: invoice
+            image: busybox:1.36
+            command: ["sh", "-c", "while true; do echo invoices processed; sleep 30; done"]
+            securityContext:
+              privileged: true
+    EOF
+tasks:
+  - "Finding 1: make `invoice` run without privileged mode, as user 1000 with runAsNonRoot, without privilege escalation and with all capabilities dropped."
+  - "Finding 2: remove the cluster-admin binding. Give the ServiceAccount `invoice` a Role `invoice-reader` that can only get the ConfigMap `invoice-config` (resourceNames), bound with a RoleBinding `invoice-reader`."
+  - "Finding 3: stop mounting the ServiceAccount token into the `invoice` Pods."
+  - "Finding 4: make the namespace `billing` enforce the baseline Pod Security Standard and warn about anything that breaks restricted."
+checks:
+  - name: invoice is not privileged
+    kind: Deployment
+    namespace: billing
+    resource: invoice
+    path: .spec.template.spec.containers[0].securityContext.privileged
+    matches: "^(false)?$"
+  - name: invoice runs as user 1000
+    command: kubectl exec -n billing deploy/invoice -- id -u
+    outputMatches: "^1000"
+  - name: Capabilities are dropped
+    kind: Deployment
+    namespace: billing
+    resource: invoice
+    path: .spec.template.spec.containers[0].securityContext.capabilities.drop
+    contains: ALL
+  - name: The cluster-admin binding is gone
+    kind: ClusterRoleBinding
+    resource: invoice-admin
+    expect: absent
+  - name: invoice can read its ConfigMap
+    command: kubectl auth can-i get configmap/invoice-config -n billing --as=system:serviceaccount:billing:invoice
+    outputMatches: "^yes"
+  - name: invoice cannot read other ConfigMaps or Secrets
+    command: kubectl auth can-i list secrets -n billing --as=system:serviceaccount:billing:invoice
+    outputMatches: "^no"
+  - name: The token is not mounted
+    kind: Deployment
+    namespace: billing
+    resource: invoice
+    path: .spec.template.spec.automountServiceAccountToken
+    equals: false
+  - name: billing enforces baseline
+    kind: Namespace
+    resource: billing
+    path: .metadata.labels['pod-security.kubernetes.io/enforce']
+    equals: baseline
+  - name: billing warns on restricted
+    kind: Namespace
+    resource: billing
+    path: .metadata.labels['pod-security.kubernetes.io/warn']
+    equals: restricted
+  - name: invoice is available
+    kind: Deployment
+    namespace: billing
+    resource: invoice
+    path: .status.availableReplicas
+    equals: 1
+hints:
+  - "Fix the Deployment first: once the namespace enforces baseline, the privileged Pods can no longer be recreated."
+  - "kubectl create role invoice-reader -n billing --verb=get --resource=configmaps --resource-name=invoice-config"
+  - "automountServiceAccountToken: false goes in the Pod template spec. The labels are pod-security.kubernetes.io/enforce=baseline and pod-security.kubernetes.io/warn=restricted."
+solution:
+  - |
+    cat <<EOF > patch.yaml
+    spec:
+      template:
+        spec:
+          automountServiceAccountToken: false
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 1000
+          containers:
+          - name: invoice
+            securityContext:
+              privileged: false
+              allowPrivilegeEscalation: false
+              capabilities:
+                drop: ["ALL"]
+    EOF
+  - kubectl patch deployment invoice -n billing --patch-file patch.yaml
+  - kubectl delete clusterrolebinding invoice-admin
+  - kubectl create role invoice-reader -n billing --verb=get --resource=configmaps --resource-name=invoice-config
+  - kubectl create rolebinding invoice-reader -n billing --role=invoice-reader --serviceaccount=billing:invoice
+  - kubectl label namespace billing pod-security.kubernetes.io/enforce=baseline pod-security.kubernetes.io/warn=restricted
+  - kubectl rollout status deployment/invoice -n billing --timeout=60s
+learned: |
+  Each finding maps to a control you can keep in place: securityContext in
+  every manifest, least-privilege Roles with resourceNames, no token unless
+  needed, and Pod Security labels on every namespace. Auditors also ask how
+  you prevent regressions; admission rules answer that.

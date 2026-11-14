@@ -1,0 +1,48 @@
+id: a08-kubectl-debug
+title: Debug a container that has no shell
+level: advanced
+minutes: 10
+tracks: [ckad, cka]
+topic: Observability and debugging
+intro: |
+  Many production images are built from scratch or distroless bases: they
+  contain the app and nothing else. `kubectl exec POD -- sh` fails because
+  there is no shell to run.
+
+  `kubectl debug` adds an ephemeral container to the running Pod. It shares
+  the Pod's network, so `localhost` reaches the app, and with `--target` it
+  also shares the target container's process namespace.
+
+  The Pod `echo` serves a secret phrase on port 5678.
+setup:
+  - kubectl run echo --image=hashicorp/http-echo:1.0 -- -text=phrase-of-the-day-42 -listen=:5678
+tasks:
+  - Try `kubectl exec echo -- sh` and read the error.
+  - Add an ephemeral debug container named `dbg` (image `busybox:1.36`) to `echo` that targets the container `echo` and fetches `http://localhost:5678`.
+  - Save the response printed by the debug container to `phrase.txt`.
+checks:
+  - name: echo has an ephemeral container named dbg
+    kind: Pod
+    resource: echo
+    path: .spec.ephemeralContainers[0].name
+    equals: dbg
+  - name: The debug container targets echo
+    kind: Pod
+    resource: echo
+    path: .spec.ephemeralContainers[0].targetContainerName
+    equals: echo
+  - name: phrase.txt has the phrase
+    command: cat phrase.txt
+    outputMatches: phrase-of-the-day-42
+hints:
+  - "kubectl debug echo --image=busybox:1.36 --target=echo --container=dbg -- wget -qO- localhost:5678"
+  - "The debug container's output is in its logs: kubectl logs echo -c dbg > phrase.txt"
+solution:
+  - kubectl debug echo --image=busybox:1.36 --target=echo --container=dbg -- wget -qO- localhost:5678
+  - sleep 5
+  - kubectl logs echo -c dbg > phrase.txt
+learned: |
+  Interactive use is kubectl debug -it POD --image=busybox:1.36 --target=CONTAINER.
+  Ephemeral containers cannot be removed or restarted; they stay in the Pod
+  spec until the Pod is deleted. For Pods that crash too fast, debug a copy
+  instead with --copy-to.

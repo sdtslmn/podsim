@@ -1,0 +1,43 @@
+id: b15-fix-imagepull
+title: Fix a Pod that cannot pull its image
+level: beginner
+minutes: 8
+tracks: [ckad, cka]
+topic: Troubleshooting basics
+intro: |
+  A teammate created a Pod named `webapp`, but it never starts. Your job is
+  to find out why and fix it so it runs nginx:1.27.
+
+  The usual troubleshooting path is: kubectl get pods (what state?), then
+  kubectl describe pod (what do the Events say?), then fix the cause.
+setup:
+  - kubectl run webapp --image=ngnix:1.27 --labels=app=webapp
+tasks:
+  - Find out why the Pod `webapp` is not running.
+  - Fix it so that `webapp` runs the image `nginx:1.27`. Keep the Pod name `webapp`.
+checks:
+  - name: Pod webapp exists
+    kind: Pod
+    resource: webapp
+    expect: exists
+  - name: Pod webapp uses nginx:1.27
+    kind: Pod
+    resource: webapp
+    path: .spec.containers[0].image
+    matches: "^(docker.io/(library/)?)?nginx:1\\.27$"
+  - name: Pod webapp is Running
+    kind: Pod
+    resource: webapp
+    path: .status.phase
+    equals: Running
+hints:
+  - "kubectl describe pod webapp. Read the Events at the bottom: which image name did it try to pull?"
+  - "A Pod's container image is one of the few fields you can change on a running Pod. Find the container name in the describe output."
+  - "kubectl set image pod/webapp webapp=nginx:1.27"
+solution:
+  - kubectl set image pod/webapp webapp=nginx:1.27
+learned: |
+  ErrImagePull and ImagePullBackOff mean the node could not download the image:
+  a typo in the name or tag, a private registry without credentials, or no
+  network to the registry. Most other Pod fields cannot be changed in place;
+  for those you delete and recreate the Pod (kubectl replace --force -f pod.yaml).

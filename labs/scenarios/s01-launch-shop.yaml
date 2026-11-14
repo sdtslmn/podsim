@@ -1,0 +1,161 @@
+id: s01-launch-shop
+title: "Launch day: deploy a three-tier shop"
+level: scenario
+minutes: 30
+tracks: [ckad]
+topic: Real-life scenarios
+intro: |
+  The team is launching a small online shop today and you own the
+  Kubernetes side. The app has three tiers:
+
+  - `redis`: the cache and session store (image `redis:7`, port 6379)
+  - `api`: the backend (image `hashicorp/http-echo:1.0`, args
+    `-text=api-ok` and `-listen=:5678`)
+  - `web`: the storefront (image `nginx:1.29`, port 80)
+
+  Everything lives in a new namespace `shop`. Customers reach the shop at
+  `http://shop.local` through the ingress-nginx controller (NodePort 30080
+  on every node). Security asked that only the backend may talk to redis.
+
+  This is a long task with many parts. Work through it in order and use
+  `check` as you go to see which parts are done.
+tasks:
+  - Create the namespace `shop`.
+  - Create a ConfigMap `shop-config` in `shop` with `STORE_NAME=PodSim Store` and `CURRENCY=EUR`.
+  - Run `redis` as a Deployment with 1 replica (Pod label `app=redis`) behind a ClusterIP Service `redis` on port 6379.
+  - Run `api` as a Deployment with 2 replicas (Pod label `app=api`) that loads `shop-config` with envFrom, has a readiness probe (HTTP GET `/` on port 5678) and requests 100m CPU and 64Mi memory. Put it behind a Service `api` on port 80 (target port 5678).
+  - Run `web` as a Deployment with 2 replicas (Pod label `app=web`) behind a Service `web` on port 80.
+  - Create an Ingress `shop` (class `nginx`) for the host `shop.local`. `/api` (prefix) goes to `api:80`, everything else to `web:80`.
+  - Create a NetworkPolicy `redis-from-api` so that only Pods labeled `app=api` can reach redis on TCP 6379.
+checks:
+  - name: Namespace shop exists
+    kind: Namespace
+    resource: shop
+    expect: exists
+  - name: shop-config has STORE_NAME
+    kind: ConfigMap
+    namespace: shop
+    resource: shop-config
+    path: .data.STORE_NAME
+    equals: PodSim Store
+  - name: redis is available
+    kind: Deployment
+    namespace: shop
+    resource: redis
+    path: .status.availableReplicas
+    equals: 1
+  - name: api runs 2 ready replicas
+    kind: Deployment
+    namespace: shop
+    resource: api
+    path: .status.readyReplicas
+    equals: 2
+  - name: api has a readiness probe
+    kind: Deployment
+    namespace: shop
+    resource: api
+    path: .spec.template.spec.containers[0].readinessProbe.httpGet.port
+    equals: 5678
+  - name: api loads shop-config
+    kind: Deployment
+    namespace: shop
+    resource: api
+    path: .spec.template.spec.containers[0].envFrom[0].configMapRef.name
+    equals: shop-config
+  - name: api requests 100m CPU
+    kind: Deployment
+    namespace: shop
+    resource: api
+    path: .spec.template.spec.containers[0].resources.requests.cpu
+    equals: 100m
+  - name: web runs 2 ready replicas
+    kind: Deployment
+    namespace: shop
+    resource: web
+    path: .status.readyReplicas
+    equals: 2
+  - name: http://shop.local/ serves the storefront
+    command: "curl -s -H 'Host: shop.local' http://node01:30080/"
+    outputMatches: Welcome to nginx
+  - name: http://shop.local/api reaches the api
+    command: "curl -s -H 'Host: shop.local' http://node01:30080/api/products"
+    outputMatches: "^api-ok"
+  - name: An api Pod can reach redis
+    command: kubectl run lab-check -n shop -l app=api --rm -i --image=busybox:1.36 --restart=Never -- nc -z -w 2 redis 6379
+    exitCode: 0
+  - name: Other Pods cannot reach redis
+    command: kubectl run lab-check -n shop -l app=web --rm -i --image=busybox:1.36 --restart=Never -- nc -z -w 2 redis 6379
+    exitCode: 1
+hints:
+  - "kubectl create deployment and kubectl expose cover redis and web. For api, generate YAML with --dry-run=client -o yaml and add envFrom, readinessProbe and resources."
+  - "kubectl create ingress shop -n shop --class=nginx --rule='shop.local/api*=api:80' --rule='shop.local/*=web:80'"
+  - "The NetworkPolicy selects app=redis and allows ingress from podSelector app=api on port 6379."
+solution:
+  - kubectl create namespace shop
+  - kubectl create configmap shop-config -n shop --from-literal=STORE_NAME="PodSim Store" --from-literal=CURRENCY=EUR
+  - kubectl create deployment redis -n shop --image=redis:7 --port=6379
+  - kubectl expose deployment redis -n shop --port=6379
+  - |
+    cat <<EOF | kubectl apply -f -
+    apiVersion: apps/v1
+    kind: Deployment
+    metadata:
+      name: api
+      namespace: shop
+    spec:
+      replicas: 2
+      selector:
+        matchLabels:
+          app: api
+      template:
+        metadata:
+          labels:
+            app: api
+        spec:
+          containers:
+          - name: api
+            image: hashicorp/http-echo:1.0
+            args: ["-text=api-ok", "-listen=:5678"]
+            envFrom:
+            - configMapRef:
+                name: shop-config
+            readinessProbe:
+              httpGet:
+                path: /
+                port: 5678
+            resources:
+              requests:
+                cpu: 100m
+                memory: 64Mi
+    EOF
+  - kubectl expose deployment api -n shop --port=80 --target-port=5678
+  - kubectl create deployment web -n shop --image=nginx:1.29 --replicas=2 --port=80
+  - kubectl expose deployment web -n shop --port=80
+  - kubectl create ingress shop -n shop --class=nginx --rule='shop.local/api*=api:80' --rule='shop.local/*=web:80'
+  - |
+    cat <<EOF | kubectl apply -f -
+    apiVersion: networking.k8s.io/v1
+    kind: NetworkPolicy
+    metadata:
+      name: redis-from-api
+      namespace: shop
+    spec:
+      podSelector:
+        matchLabels:
+          app: redis
+      policyTypes: ["Ingress"]
+      ingress:
+      - from:
+        - podSelector:
+            matchLabels:
+              app: api
+        ports:
+        - protocol: TCP
+          port: 6379
+    EOF
+  - sleep 20
+learned: |
+  A real launch adds more of the same: resource limits everywhere, probes on
+  every tier, a PodDisruptionBudget for each Deployment, TLS on the Ingress
+  and a default-deny policy for the namespace. The pattern you just built is
+  the core of almost every web application on Kubernetes.

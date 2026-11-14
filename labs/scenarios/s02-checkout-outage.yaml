@@ -1,0 +1,156 @@
+id: s02-checkout-outage
+title: "Outage: checkout is down"
+level: scenario
+minutes: 25
+tracks: [ckad, cka]
+topic: Real-life scenarios
+intro: |
+  It's Friday evening. Customers report errors on `http://store.local/checkout`,
+  and the payments service has not started since the last release. You are
+  on call.
+
+  Everything runs in the namespace `store`. The pieces are the Deployments
+  `checkout` and `payments`, the Service `checkout` and the Ingress `store`
+  (the ingress controller listens on NodePort 30080). Nobody changed the
+  ingress controller.
+
+  There is more than one problem. Work like you would in a real incident:
+  look at the symptoms, follow the request path (Ingress, Service,
+  endpoints, Pods), read events and logs, fix one thing at a time and check
+  again.
+setup:
+  - kubectl create namespace store
+  - |
+    cat <<EOF | kubectl apply -f -
+    apiVersion: v1
+    kind: ConfigMap
+    metadata:
+      name: payments-config
+      namespace: store
+    data:
+      PAYMENT_TIMEOUT: "30"
+    ---
+    apiVersion: apps/v1
+    kind: Deployment
+    metadata:
+      name: payments
+      namespace: store
+    spec:
+      replicas: 1
+      selector:
+        matchLabels:
+          app: payments
+      template:
+        metadata:
+          labels:
+            app: payments
+        spec:
+          containers:
+          - name: payments
+            image: busybox:1.36
+            command: ["sh", "-c", "echo \"payments ready, gateway=\$PAYMENT_GATEWAY\"; sleep 3600"]
+            env:
+            - name: PAYMENT_GATEWAY
+              valueFrom:
+                configMapKeyRef:
+                  name: payments-config
+                  key: PAYMENT_GATEWAY
+    ---
+    apiVersion: apps/v1
+    kind: Deployment
+    metadata:
+      name: checkout
+      namespace: store
+    spec:
+      replicas: 2
+      selector:
+        matchLabels:
+          app: checkout
+      template:
+        metadata:
+          labels:
+            app: checkout
+        spec:
+          containers:
+          - name: checkout
+            image: hashicorp/http-echo:1.0
+            args: ["-text=checkout ok", "-listen=:5678"]
+            readinessProbe:
+              httpGet:
+                path: /
+                port: 8080
+              periodSeconds: 5
+    ---
+    apiVersion: v1
+    kind: Service
+    metadata:
+      name: checkout
+      namespace: store
+    spec:
+      selector:
+        app: check-out
+      ports:
+      - port: 80
+        targetPort: 5678
+    ---
+    apiVersion: networking.k8s.io/v1
+    kind: Ingress
+    metadata:
+      name: store
+      namespace: store
+    spec:
+      ingressClassName: nginx
+      rules:
+      - host: store.local
+        http:
+          paths:
+          - path: /checkout
+            pathType: Prefix
+            backend:
+              service:
+                name: checkout
+                port:
+                  number: 80
+    EOF
+settle: 30
+tasks:
+  - Make `http://store.local/checkout` answer `checkout ok` again, with both `checkout` replicas ready.
+  - Get `payments` running. The payment gateway to use is `https://pay.example.com`.
+  - Fix the causes, not the symptoms. Keep the object names, and do not delete the Ingress.
+checks:
+  - name: Both checkout replicas are ready
+    kind: Deployment
+    namespace: store
+    resource: checkout
+    path: .status.readyReplicas
+    equals: 2
+  - name: The Service checkout has endpoints
+    command: kubectl get endpoints checkout -n store -o jsonpath='{.subsets[*].addresses[*].ip}' | wc -w
+    outputMatches: "^\\s*2\\s*$"
+  - name: http://store.local/checkout works
+    command: "curl -s -H 'Host: store.local' http://node01:30080/checkout"
+    outputMatches: "^checkout ok"
+  - name: payments is available
+    kind: Deployment
+    namespace: store
+    resource: payments
+    path: .status.availableReplicas
+    equals: 1
+  - name: payments uses the right gateway
+    command: kubectl logs deploy/payments -n store
+    outputMatches: gateway=https://pay.example.com
+hints:
+  - "Start with kubectl get all -n store and kubectl get endpoints -n store. Pods that are Running but 0/1 ready point at the readiness probe."
+  - "kubectl describe pod on a checkout Pod shows the probe failing on port 8080; the app listens on 5678. The Service selector is also worth comparing with the Pod labels."
+  - "payments shows CreateContainerConfigError: kubectl describe says which ConfigMap key is missing. Add it with kubectl edit cm payments-config -n store or kubectl patch."
+solution:
+  - "kubectl patch deployment checkout -n store --type=json -p '[{\"op\":\"replace\",\"path\":\"/spec/template/spec/containers/0/readinessProbe/httpGet/port\",\"value\":5678}]'"
+  - "kubectl patch service checkout -n store -p '{\"spec\":{\"selector\":{\"app\":\"checkout\"}}}'"
+  - "kubectl patch configmap payments-config -n store -p '{\"data\":{\"PAYMENT_GATEWAY\":\"https://pay.example.com\"}}'"
+  - sleep 30
+learned: |
+  The request path is the checklist: Ingress rule, Service, endpoints, Pod
+  readiness, container. kubectl get endpoints tells you in one command
+  whether the Service problem is the selector (no addresses) or the Pods
+  (not ready). CreateContainerConfigError recovers by itself once the
+  missing ConfigMap key appears; no restart needed.

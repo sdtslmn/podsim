@@ -5,7 +5,8 @@ import "@xterm/xterm/css/xterm.css";
 import "./style.css";
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
-import { Cluster, Shell, LabSession, MemoryFS, parseLab, parseExam, ExamSession, K8S_VERSION, type IO, type Lab, type CheckResult, type Exam, type ExamResult } from "@podsim/core";
+import { Cluster, Shell, LabSession, MemoryFS, parseLab, parseExam, parseCurriculum, curriculumOrder, labPlace, labCode, findLabByRef, ExamSession, K8S_VERSION, type IO, type Lab, type CheckResult, type Exam, type ExamResult, type Curriculum } from "@podsim/core";
+import curriculumText from "../../../labs/curriculum.yaml?raw";
 import { LineEditor } from "./line-editor";
 
 const REPO_URL: string = import.meta.env.VITE_REPO_URL ?? "https://github.com/sdtslmn/podsim";
@@ -13,8 +14,9 @@ const REPO_URL: string = import.meta.env.VITE_REPO_URL ?? "https://github.com/sd
 // ---------------------------------------------------------------- labs
 
 const rawLabs = import.meta.glob("../../../labs/**/*.yaml", { query: "?raw", import: "default", eager: true }) as Record<string, string>;
-const LEVELS = { beginner: 0, intermediate: 1, advanced: 2 };
-const labs: Lab[] = Object.entries(rawLabs)
+const LEVELS = { beginner: 0, intermediate: 1, advanced: 2, scenario: 3 };
+const allLabs: Lab[] = Object.entries(rawLabs)
+  .filter(([file]) => !file.endsWith("/curriculum.yaml"))
   .map(([file, text]) => {
     try {
       return parseLab(text, file);
@@ -25,6 +27,16 @@ const labs: Lab[] = Object.entries(rawLabs)
   })
   .filter((l): l is Lab => !!l)
   .sort((a, b) => LEVELS[a.level] - LEVELS[b.level] || a.id.localeCompare(b.id));
+
+let curriculum: Curriculum = { levels: [], tracks: [] };
+try {
+  curriculum = parseCurriculum(curriculumText);
+} catch (e) {
+  console.warn(`Curriculum not loaded: ${(e as Error).message}`);
+}
+/** Labs in learning-path order. */
+const labs: Lab[] = curriculumOrder(curriculum, allLabs);
+const labById = new Map(labs.map((l) => [l.id, l]));
 
 const rawExams = import.meta.glob("../../../exams/*.yaml", { query: "?raw", import: "default", eager: true }) as Record<string, string>;
 const exams: Exam[] = Object.entries(rawExams)
@@ -39,9 +51,47 @@ const exams: Exam[] = Object.entries(rawExams)
   .filter((e): e is Exam => !!e);
 
 const PROGRESS_KEY = "podsim.progress";
+/** Lab ids before the curriculum was regrouped (v0.2), so saved progress carries over. */
+const RENAMED: Record<string, string> = {
+  "01-first-pod": "b02-first-pod",
+  "02-pod-from-yaml": "b03-pod-from-yaml",
+  "03-namespaces": "b05-namespaces",
+  "04-deployment": "b07-deployment",
+  "05-scale": "b08-scale",
+  "06-rolling-update": "b09-rolling-update",
+  "07-rollback": "b10-rollback",
+  "08-service": "b11-service",
+  "09-fix-imagepull": "b15-fix-imagepull",
+  "10-configmap-env": "b13-configmap-env",
+  "ckad-01-build-image": "a03-build-image",
+  "ckad-02-cronjob": "i02-cronjob",
+  "ckad-03-job-parallel": "i01-job-parallel",
+  "ckad-04-init-container": "i05-init-container",
+  "ckad-05-sidecar": "i06-sidecar",
+  "ckad-06-pvc": "i07-pvc",
+  "ckad-07-rolling-update": "i20-update-strategy",
+  "ckad-08-canary": "a01-canary",
+  "ckad-09-blue-green": "a02-blue-green",
+  "ckad-10-helm": "i21-helm",
+  "ckad-11-kustomize": "i22-kustomize",
+  "ckad-12-probes": "i10-probes",
+  "ckad-13-fix-liveness": "i11-fix-liveness",
+  "ckad-14-deprecated-api": "a05-deprecated-api",
+  "ckad-15-debug-crash": "a06-debug-crash",
+  "ckad-16-top": "a07-top",
+  "ckad-17-config-secrets": "i09-config-secrets",
+  "ckad-18-security-context": "i15-security-context",
+  "ckad-19-rbac": "i14-rbac",
+  "ckad-20-quota": "i12-quota",
+  "ckad-21-crd": "a04-crd",
+  "ckad-22-network-policy": "i17-network-policy",
+  "ckad-23-fix-service": "i16-fix-service",
+  "ckad-24-ingress": "i18-ingress",
+};
 function loadProgress(): Set<string> {
   try {
-    return new Set(JSON.parse(localStorage.getItem(PROGRESS_KEY) ?? "[]") as string[]);
+    const ids = JSON.parse(localStorage.getItem(PROGRESS_KEY) ?? "[]") as string[];
+    return new Set(ids.map((id) => RENAMED[id] ?? id));
   } catch {
     return new Set();
   }
@@ -134,7 +184,7 @@ const prompt = () => {
     const p = exam.prompt();
     return p.startsWith("candidate@") ? `${C.green(p.slice(0, p.indexOf(":")))}:${C.cyan("~")}$ ` : p;
   }
-  return shell.sessionPrompt() ?? `${lab ? C.yellow(`[${lab.id.startsWith("ckad-") ? lab.id.split("-").slice(0, 2).join("-") : lab.id.split("-")[0]}] `) : ""}${C.green("controlplane")}:${C.cyan("~")}$ `;
+  return shell.sessionPrompt() ?? `${lab ? C.yellow(`[${labCode(lab.id)}] `) : ""}${C.green("controlplane")}:${C.cyan("~")}$ `;
 };
 const activeCluster = () => (exam ? exam.cluster : cluster);
 const activeShell = () => (exam ? exam.shell : shell);
@@ -235,7 +285,7 @@ async function startLab(next: Lab, showIntro = true): Promise<void> {
   for (const e of errors) print(C.yellow(`setup warning: ${e}`));
   if (showIntro) {
     print("");
-    print(C.bold(`Lab ${next.id}: ${next.title}`));
+    print(C.bold(`Lab ${labCode(next.id)}: ${next.title}`));
     next.tasks.forEach((t, i) => print(`  ${i + 1}. ${termMd(t)}`));
     print(C.dim("The full instructions are in the panel on the left. Type check when you are done."));
   }
@@ -243,8 +293,9 @@ async function startLab(next: Lab, showIntro = true): Promise<void> {
 }
 
 function nextLab(): Lab | undefined {
-  if (!lab) return labs[0];
-  return labs[labs.findIndex((l) => l.id === lab!.id) + 1];
+  if (!lab) return labs.find((l) => !done.has(l.id)) ?? labs[0];
+  const i = labs.findIndex((l) => l.id === lab!.id);
+  return labs.slice(i + 1).find((l) => !done.has(l.id)) ?? labs[i + 1];
 }
 
 async function runCheck(fromButton: boolean): Promise<void> {
@@ -445,19 +496,41 @@ function renderExamResult(): void {
 function registerCommands(): void {
   const needLab = (out: IO): boolean => {
     if (lab) return true;
-    out.stderr("You are in the free sandbox. Start a lab first, e.g. lab 1. Type labs to see them all.\n");
+    out.stderr("You are in the free sandbox. Start a lab first, e.g. lab b1. Type labs to see them all.\n");
     return false;
   };
-  shell.registerCommand("labs", () => {
+  shell.registerCommand("labs", (args) => {
     view = "labs";
     renderPanel();
-    labs.forEach((l, i) => print(`  ${done.has(l.id) ? C.green("✔") : " "} ${String(i + 1).padStart(2)}  ${l.title}`));
-    print(C.dim("Start one with lab <number>, or click it in the panel."));
+    const track = curriculum.tracks.find((t) => t.id === args[0]);
+    if (track) {
+      for (const sec of track.sections) {
+        print(C.bold(`${sec.title}${sec.weight ? ` (${sec.weight}%)` : ""}`));
+        for (const id of sec.labs) {
+          const l = labById.get(id);
+          if (l) print(`  ${done.has(id) ? C.green("✔") : " "} ${labCode(id).padEnd(4)} ${l.title}`);
+        }
+      }
+      if (track.exams.length) print(`${C.bold("Mock exams")}: ${track.exams.join(", ")} (Mock exam tab)`);
+      return 0;
+    }
+    for (const lv of curriculum.levels) {
+      const ids = lv.modules.flatMap((m) => m.labs);
+      print(`${C.bold(lv.title)} ${C.dim(`${ids.filter((id) => done.has(id)).length}/${ids.length} done`)}`);
+      for (const m of lv.modules) {
+        print(C.dim(`  ${m.title}`));
+        for (const id of m.labs) {
+          const l = labById.get(id);
+          if (l) print(`    ${done.has(id) ? C.green("✔") : " "} ${labCode(id).padEnd(4)} ${l.title}`);
+        }
+      }
+    }
+    print(C.dim(`Start one with lab <code>, e.g. lab b1 or lab s2. Type labs ckad for the CKAD track.`));
     return 0;
   });
   shell.registerCommand("lab", async (args, out) => {
     const arg = args[0];
-    const found = arg ? (/^\d+$/.test(arg) ? labs.find((l) => parseInt(l.id, 10) === parseInt(arg, 10)) : labs.find((l) => l.id.includes(arg))) : lab;
+    const found = arg ? findLabByRef(labs, arg) : lab;
     if (!found) {
       out.stderr(`No lab matches "${arg ?? ""}". Type labs to see them.\n`);
       return 1;
@@ -513,7 +586,8 @@ function registerCommands(): void {
   shell.registerCommand("help", () => {
     print(`${C.bold("PodSim help")}
   kubectl ... (or k ...)   run kubectl against the simulated cluster
-  labs / lab <n>           list labs / start lab n
+  labs / labs ckad         the learning path / the CKAD track
+  lab <code>               start a lab, e.g. lab b1, lab i4, lab s2
   task, check, hint        show tasks, check your work, get a hint
   solution, reset, next    show a solution, restart the lab, next lab
   sandbox                  free practice cluster
@@ -543,26 +617,55 @@ function renderPanel(): void {
   return renderLabList();
 }
 
+let labTab: "path" | string = "path";
+
+function labItem(id: string): string {
+  const l = labById.get(id);
+  if (!l) return "";
+  return `<li data-lab="${esc(l.id)}"><span class="code">${labCode(l.id)}</span><span class="${done.has(l.id) ? "done" : ""}">${esc(l.title)}</span><span class="meta">${l.minutes} min</span></li>`;
+}
+
+function progressText(ids: string[]): string {
+  const n = ids.filter((id) => done.has(id)).length;
+  return `<span class="progress"><span style="width:${ids.length ? Math.round((n / ids.length) * 100) : 0}%"></span></span><span class="meta">${n}/${ids.length}</span>`;
+}
+
 function renderLabList(): void {
-  let html = `<h2>Kubernetes labs</h2>
-  <p class="meta">Short, guided exercises on a simulated cluster. Each lab checks your work automatically. Your progress is saved in this browser.</p>`;
-  let level = "";
-  for (const l of labs) {
-    const group = l.id.startsWith("ckad-") ? `CKAD · ${l.topic}` : l.level;
-    if (group !== level) {
-      if (level) html += "</ul>";
-      level = group;
-      html += `<h3>${esc(level)}</h3><ul class="lab-list">`;
+  const tabs = [{ id: "path", title: "Learning path" }, ...curriculum.tracks.map((t) => ({ id: t.id, title: `${t.title} track` }))];
+  let html = `<h2>Kubernetes training</h2>
+  <p class="meta">From zero to production on a simulated cluster. Every lab checks your work automatically, and your progress is saved in this browser.</p>
+  <div class="tabs">${tabs.map((t) => `<button class="tab${labTab === t.id ? " active" : ""}" data-tab="${esc(t.id)}">${esc(t.title)}</button>`).join("")}</div>`;
+  const track = curriculum.tracks.find((t) => t.id === labTab);
+  if (!track) {
+    const firstOpen = curriculum.levels.find((lv) => lv.modules.some((m) => m.labs.some((id) => !done.has(id))))?.id;
+    curriculum.levels.forEach((lv, i) => {
+      const ids = lv.modules.flatMap((m) => m.labs);
+      html += `<details class="level"${lv.id === firstOpen ? " open" : ""}><summary><span class="level-title">${i + 1}. ${esc(lv.title)}</span>${progressText(ids)}</summary>
+      <p class="meta">${esc(lv.summary)}</p>`;
+      for (const m of lv.modules) html += `<h4>${esc(m.title)}</h4><ul class="lab-list">${m.labs.map(labItem).join("")}</ul>`;
+      html += `</details>`;
+    });
+    if (!curriculum.levels.length) html += `<ul class="lab-list">${labs.map((l) => labItem(l.id)).join("")}</ul>`;
+  } else {
+    html += `<p>${esc(track.summary)}</p>`;
+    for (const sec of track.sections) {
+      html += `<details class="level" open><summary><span class="level-title">${esc(sec.title)}${sec.weight ? ` <span class="meta">${sec.weight}%</span>` : ""}</span>${progressText(sec.labs)}</summary>
+      ${sec.summary ? `<p class="meta">${esc(sec.summary)}</p>` : ""}<ul class="lab-list">${sec.labs.map(labItem).join("")}</ul></details>`;
     }
-    html += `<li data-lab="${esc(l.id)}"><span class="${done.has(l.id) ? "done" : ""}">${esc(l.title)}</span><span class="meta">${l.minutes} min</span></li>`;
+    const trackExams = exams.filter((e) => track.exams.includes(e.id));
+    if (trackExams.length) html += `<h3>Mock exams</h3><p>${trackExams.map((e) => `<button class="btn" data-exam="${esc(e.id)}">${esc(e.title)}</button>`).join(" ")}</p><p class="meta">${trackExams[0].tasks.length} tasks each, ${trackExams[0].minutes} minutes, ssh to a host per task, scored automatically.</p>`;
   }
-  html += "</ul>";
-  if (exams.length) html += `<h3>Mock exam</h3><p>Ready for a full run? ${exams.map((e) => `<button class="btn" data-exam="${esc(e.id)}">${esc(e.title)}</button>`).join(" ")} <span class="meta">${exams[0].tasks.length} tasks, ${exams[0].minutes} minutes, scored automatically.</span></p>`;
   html += `<h3>Free practice</h3><p>Prefer to explore? <button class="btn" id="go-sandbox">Open the sandbox</button></p>`;
   panel.innerHTML = html;
+  panel.querySelectorAll<HTMLButtonElement>("button[data-tab]").forEach((b) =>
+    b.addEventListener("click", () => {
+      labTab = b.dataset.tab!;
+      renderLabList();
+    }),
+  );
   panel.querySelectorAll<HTMLLIElement>("li[data-lab]").forEach((li) =>
     li.addEventListener("click", () => {
-      const l = labs.find((x) => x.id === li.dataset.lab);
+      const l = labById.get(li.dataset.lab!);
       if (l) {
         term.write("\r\x1b[K");
         void startLab(l);
@@ -585,8 +688,11 @@ function renderLabList(): void {
 function renderLab(): void {
   const l = lab!;
   const complete = lastResults?.length && lastResults.every((r) => r.passed);
-  let html = `<p class="meta">${esc(l.level)} · about ${l.minutes} min · ${esc(l.topic)}${done.has(l.id) ? " · completed" : ""}</p>
-  <h2>${esc(l.title)}</h2>
+  const place = labPlace(curriculum, l.id);
+  const where = [labCode(l.id), place.level?.title ?? l.level, place.module?.title ?? l.topic].filter(Boolean).map((x) => esc(String(x))).join(" · ");
+  const tags = place.sections.map(({ track, section }) => `<span class="tag">${esc(track.title)}: ${esc(section.title)}</span>`).join(" ");
+  let html = `<p class="meta">${where} · about ${l.minutes} min${done.has(l.id) ? " · completed" : ""}</p>
+  <h2>${esc(l.title)}</h2>${tags ? `<p>${tags}</p>` : ""}
   <div class="intro">${md(l.intro)}</div>
   <h3>Tasks</h3><ol class="tasks">${l.tasks.map((t) => `<li>${md(t)}</li>`).join("")}</ol>
   <div class="actions">
@@ -721,7 +827,7 @@ renderPanel();
 print(C.bold("PodSim") + C.dim("  Kubernetes training simulator. Nothing here runs real containers."));
 print(C.dim(`Simulated cluster: controlplane, node01, node02 (Kubernetes ${K8S_VERSION})`));
 print("");
-print(`Pick a lab on the left, type ${C.cyan("lab 1")}, or just use ${C.cyan("kubectl")}. Type ${C.cyan("help")} for commands.`);
+print(`Pick a lab on the left, type ${C.cyan("lab b1")}, or just use ${C.cyan("kubectl")}. Type ${C.cyan("help")} for commands.`);
 print("");
 editor.showPrompt();
 term.focus();

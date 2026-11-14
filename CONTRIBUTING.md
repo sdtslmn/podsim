@@ -12,9 +12,9 @@ npm test
 
 ## Adding a lab
 
-1. Copy an existing lab in `labs/beginner/` and change it. The format is described in [docs/writing-labs.md](docs/writing-labs.md).
+1. Copy an existing lab from the level it belongs to (`labs/beginner/`, `labs/intermediate/`, `labs/advanced/` or `labs/scenarios/`), change it, and add its id to `labs/curriculum.yaml`. The format is described in [docs/writing-labs.md](docs/writing-labs.md).
 2. Run `npm run validate-labs` until it passes.
-3. Try the lab yourself in the shell (`npm start -- lab <number>`) as if you had never seen it.
+3. Try the lab yourself in the shell (`npm start -- lab <code>`, for example `npm start -- lab i23`) as if you had never seen it.
 4. Open a pull request.
 
 ## Fixing a fidelity problem

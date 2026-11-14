@@ -1,0 +1,96 @@
+id: a04-crd
+title: Use a custom resource
+level: advanced
+minutes: 8
+tracks: [ckad]
+topic: Build and extend
+intro: |
+  CustomResourceDefinitions add new kinds to the API. Operators watch those
+  kinds and act on them. Once a CRD is installed, its resources work with
+  kubectl like built-in ones.
+
+  A CRD for backups has been installed in this cluster.
+setup:
+  - |
+    cat <<EOF | kubectl apply -f -
+    apiVersion: apiextensions.k8s.io/v1
+    kind: CustomResourceDefinition
+    metadata:
+      name: backups.stable.example.com
+    spec:
+      group: stable.example.com
+      scope: Namespaced
+      names:
+        plural: backups
+        singular: backup
+        kind: Backup
+        shortNames: [bk]
+      versions:
+      - name: v1
+        served: true
+        storage: true
+        schema:
+          openAPIV3Schema:
+            type: object
+            properties:
+              spec:
+                type: object
+                required: [schedule, target]
+                properties:
+                  schedule:
+                    type: string
+                  target:
+                    type: string
+                  retention:
+                    type: integer
+                    minimum: 1
+        additionalPrinterColumns:
+        - name: Schedule
+          type: string
+          jsonPath: .spec.schedule
+        - name: Target
+          type: string
+          jsonPath: .spec.target
+    EOF
+tasks:
+  - Find the CRD that defines backups and look at its fields (`kubectl get crd`, `kubectl describe crd ...`).
+  - Create a Backup named `nightly` with schedule `0 2 * * *`, target `orders-db` and retention 7.
+checks:
+  - name: Backup nightly exists
+    kind: Backup
+    resource: nightly
+    expect: exists
+  - name: It runs at 2 AM
+    kind: Backup
+    resource: nightly
+    path: .spec.schedule
+    equals: 0 2 * * *
+  - name: It targets orders-db
+    kind: Backup
+    resource: nightly
+    path: .spec.target
+    equals: orders-db
+  - name: It keeps 7 backups
+    kind: Backup
+    resource: nightly
+    path: .spec.retention
+    equals: 7
+hints:
+  - "kubectl get crd backups.stable.example.com -o yaml shows the group, version and schema."
+  - "apiVersion is stable.example.com/v1 and kind is Backup. retention must be a number, not a string."
+solution:
+  - |
+    cat <<EOF | kubectl apply -f -
+    apiVersion: stable.example.com/v1
+    kind: Backup
+    metadata:
+      name: nightly
+    spec:
+      schedule: "0 2 * * *"
+      target: orders-db
+      retention: 7
+    EOF
+learned: |
+  kubectl get backups, kubectl get bk and kubectl get backups.stable.example.com
+  all work once the CRD exists. The schema is enforced by the API server:
+  wrong types and missing required fields are rejected.

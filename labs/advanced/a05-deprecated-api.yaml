@@ -1,0 +1,77 @@
+id: a05-deprecated-api
+title: Update a manifest that uses a removed API
+level: advanced
+minutes: 8
+tracks: [ckad]
+topic: Build and extend
+intro: |
+  APIs move from alpha to beta to stable, and old versions are removed.
+  A manifest written years ago may no longer apply. `inventory.yaml` in
+  your work folder is one of those.
+
+  `kubectl api-resources` and `kubectl explain` show which versions the
+  cluster serves.
+files:
+  inventory.yaml: |
+    apiVersion: extensions/v1beta1
+    kind: Deployment
+    metadata:
+      name: inventory
+    spec:
+      replicas: 2
+      template:
+        metadata:
+          labels:
+            app: inventory
+        spec:
+          containers:
+          - name: inventory
+            image: nginx:1.29
+tasks:
+  - Try to apply `inventory.yaml` and read the error.
+  - Update the file to the current API version. Current Deployments also need a selector that matches the Pod labels.
+  - Apply it so the Deployment `inventory` runs 2 replicas.
+checks:
+  - name: inventory.yaml uses apps/v1
+    command: "grep -c 'apiVersion: apps/v1' inventory.yaml"
+    outputMatches: "^1"
+  - name: Deployment inventory runs 2 ready replicas
+    kind: Deployment
+    resource: inventory
+    path: .status.readyReplicas
+    equals: 2
+  - name: The selector matches app=inventory
+    kind: Deployment
+    resource: inventory
+    path: .spec.selector.matchLabels.app
+    equals: inventory
+hints:
+  - "kubectl api-resources | grep deployments shows the group and version: apps/v1."
+  - "Add spec.selector.matchLabels.app: inventory. Without it apps/v1 rejects the Deployment."
+solution:
+  - |
+    cat <<EOF > inventory.yaml
+    apiVersion: apps/v1
+    kind: Deployment
+    metadata:
+      name: inventory
+    spec:
+      replicas: 2
+      selector:
+        matchLabels:
+          app: inventory
+      template:
+        metadata:
+          labels:
+            app: inventory
+        spec:
+          containers:
+          - name: inventory
+            image: nginx:1.29
+    EOF
+  - kubectl apply -f inventory.yaml
+  - sleep 10
+learned: |
+  "no matches for kind Deployment in version extensions/v1beta1" means the
+  version was removed. The Kubernetes deprecation guide lists each removal
+  and its replacement. kubectl convert (a plugin) can rewrite manifests.

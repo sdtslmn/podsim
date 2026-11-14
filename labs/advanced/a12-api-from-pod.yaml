@@ -1,0 +1,48 @@
+id: a12-api-from-pod
+title: Call the Kubernetes API from inside a Pod
+level: advanced
+minutes: 12
+tracks: [ckad, cka]
+topic: Hardening
+intro: |
+  Every Pod gets a ServiceAccount token mounted at
+  `/var/run/secrets/kubernetes.io/serviceaccount/`, next to the cluster CA
+  certificate and the namespace. Apps use it to call the API server at
+  `https://kubernetes.default.svc`.
+
+  What the token may do depends on RBAC. The default ServiceAccount may do
+  almost nothing.
+setup:
+  - kubectl create namespace ops
+tasks:
+  - Create a ServiceAccount `reader` in `ops` and give it permission to list Pods in `ops`, and nothing else.
+  - Run a Pod named `client` in `ops` with the image `curlimages/curl:8.10.1` and the command `sleep 3600`, as the ServiceAccount `reader`.
+  - From inside `client`, call `https://kubernetes.default.svc/api/v1/namespaces/ops/pods` with the mounted token and CA, and save the response on your machine as `pods.json`.
+checks:
+  - name: client runs as reader
+    kind: Pod
+    namespace: ops
+    resource: client
+    path: .spec.serviceAccountName
+    equals: reader
+  - name: reader can list pods but not secrets
+    command: kubectl auth can-i list secrets -n ops --as=system:serviceaccount:ops:reader
+    outputMatches: "^no"
+  - name: pods.json is a PodList that includes client
+    command: cat pods.json
+    outputMatches: "\"kind\": \"PodList\"[\\s\\S]*\"name\": \"client\""
+hints:
+  - "kubectl create role pod-lister -n ops --verb=list --resource=pods, then a rolebinding to --serviceaccount=ops:reader"
+  - "kubectl run client -n ops --image=curlimages/curl:8.10.1 --overrides='{\"spec\":{\"serviceAccountName\":\"reader\"}}' -- sleep 3600"
+  - "kubectl exec -n ops client -- sh -c 'curl -s --cacert /var/run/secrets/kubernetes.io/serviceaccount/ca.crt -H \"Authorization: Bearer $(cat /var/run/secrets/kubernetes.io/serviceaccount/token)\" https://kubernetes.default.svc/api/v1/namespaces/ops/pods' > pods.json"
+solution:
+  - kubectl create serviceaccount reader -n ops
+  - kubectl create role pod-lister -n ops --verb=list --resource=pods
+  - kubectl create rolebinding reader-pod-lister -n ops --role=pod-lister --serviceaccount=ops:reader
+  - "kubectl run client -n ops --image=curlimages/curl:8.10.1 --overrides='{\"spec\":{\"serviceAccountName\":\"reader\"}}' -- sleep 3600"
+  - sleep 10
+  - "kubectl exec -n ops client -- sh -c 'curl -s --cacert /var/run/secrets/kubernetes.io/serviceaccount/ca.crt -H \"Authorization: Bearer $(cat /var/run/secrets/kubernetes.io/serviceaccount/token)\" https://kubernetes.default.svc/api/v1/namespaces/ops/pods' > pods.json"
+learned: |
+  A 403 from the API server names the user, verb, resource and namespace
+  that were refused, which tells you exactly which rule is missing. Set
+  automountServiceAccountToken: false on Pods that never call the API.

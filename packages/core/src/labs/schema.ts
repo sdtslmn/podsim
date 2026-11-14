@@ -31,7 +31,7 @@ export interface LabCheck {
 export interface Lab {
   id: string;
   title: string;
-  level: "beginner" | "intermediate" | "advanced";
+  level: "beginner" | "intermediate" | "advanced" | "scenario";
   minutes: number;
   tracks: string[];
   topic: string;
@@ -68,7 +68,7 @@ export function parseLab(text: string, source = "lab"): Lab {
   if (!raw || typeof raw !== "object") throw new LabFormatError(`${source}: not a YAML object`);
   const id = str(raw.id, "id", source);
   const level = (raw.level ?? "beginner") as Lab["level"];
-  if (!["beginner", "intermediate", "advanced"].includes(level)) throw new LabFormatError(`lab ${id}: level must be beginner, intermediate or advanced`);
+  if (!["beginner", "intermediate", "advanced", "scenario"].includes(level)) throw new LabFormatError(`lab ${id}: level must be beginner, intermediate, advanced or scenario`);
   const checks = raw.checks;
   if (!Array.isArray(checks) || checks.length === 0) throw new LabFormatError(`lab ${id}: "checks" must be a non-empty list`);
   for (const [i, c] of (checks as LabCheck[]).entries()) {

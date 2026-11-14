@@ -1,0 +1,59 @@
+id: b16-fix-crashloop
+title: Fix a Pod stuck in CrashLoopBackOff
+level: beginner
+minutes: 8
+tracks: [kcna, ckad, cka]
+topic: Troubleshooting basics
+intro: |
+  CrashLoopBackOff means the container starts, exits, and the kubelet keeps
+  restarting it with a growing delay. Kubernetes is working fine; the
+  process inside the container is not.
+
+  The container's own output usually says why. `kubectl logs POD` shows the
+  current attempt and `kubectl logs POD --previous` the one before it.
+
+  The Pod `worker` is crashing. Its manifest is in `worker.yaml`.
+files:
+  worker.yaml: |
+    apiVersion: v1
+    kind: Pod
+    metadata:
+      name: worker
+    spec:
+      containers:
+      - name: worker
+        image: busybox:1.36
+        command: ["sh", "-c", "echo processing jobs; sleeep 3600"]
+setup:
+  - kubectl apply -f worker.yaml
+settle: 30
+tasks:
+  - Find out from the logs why `worker` keeps restarting.
+  - Fix the command in `worker.yaml` so the container keeps running, and recreate the Pod with the same name.
+checks:
+  - name: Pod worker is Running
+    kind: Pod
+    resource: worker
+    path: .status.phase
+    equals: Running
+  - name: The container has not restarted
+    kind: Pod
+    resource: worker
+    path: .status.containerStatuses[0].restartCount
+    equals: 0
+  - name: The command runs sleep
+    kind: Pod
+    resource: worker
+    path: .spec.containers[0].command[2]
+    contains: sleep 3600
+hints:
+  - "kubectl logs worker shows: sh: sleeep: not found"
+  - "Fix the typo in worker.yaml, then kubectl replace --force -f worker.yaml (a Pod's command cannot be changed in place)."
+solution:
+  - sed -i 's/sleeep/sleep/' worker.yaml
+  - kubectl replace --force -f worker.yaml
+  - sleep 10
+learned: |
+  The kubelet waits 10s, 20s, 40s and so on (up to 5 minutes) between
+  restarts, which is the BackOff part. Exit code 127 means "command not
+  found"; kubectl describe pod shows the last exit code under Last State.

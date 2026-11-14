@@ -1,0 +1,69 @@
+id: b13-configmap-env
+title: Configure a Pod with a ConfigMap
+level: beginner
+minutes: 12
+tracks: [kcna, ckad]
+topic: Configuration
+intro: |
+  Keep configuration out of your images. A ConfigMap stores key and value
+  pairs that Pods can read as environment variables or as files.
+
+  To load every key of a ConfigMap as an environment variable, use envFrom
+  in the container spec:
+
+    envFrom:
+    - configMapRef:
+        name: my-config
+tasks:
+  - Create a ConfigMap named `app-config` with two keys, `APP_MODE=production` and `APP_COLOR=blue`.
+  - Create a Pod named `settings` with the image `nginx:1.27` that loads all keys of `app-config` as environment variables.
+  - "Check the variables inside the container: kubectl exec settings -- printenv APP_MODE"
+checks:
+  - name: ConfigMap app-config has APP_MODE=production
+    kind: ConfigMap
+    resource: app-config
+    path: .data.APP_MODE
+    equals: production
+  - name: ConfigMap app-config has APP_COLOR=blue
+    kind: ConfigMap
+    resource: app-config
+    path: .data.APP_COLOR
+    equals: blue
+  - name: Pod settings loads app-config with envFrom
+    kind: Pod
+    resource: settings
+    path: .spec.containers[0].envFrom[0].configMapRef.name
+    equals: app-config
+  - name: Pod settings is Running
+    kind: Pod
+    resource: settings
+    path: .status.phase
+    equals: Running
+  - name: APP_MODE is set inside the container
+    command: kubectl exec settings -- printenv APP_MODE
+    outputMatches: "^production$"
+hints:
+  - "kubectl create configmap app-config --from-literal=APP_MODE=production --from-literal=APP_COLOR=blue"
+  - "Generate the Pod with kubectl run settings --image=nginx:1.27 --dry-run=client -o yaml > settings.yaml, then add envFrom under the container."
+  - "If the Pod shows CreateContainerConfigError, the ConfigMap name in envFrom does not match an existing ConfigMap."
+solution:
+  - kubectl create configmap app-config --from-literal=APP_MODE=production --from-literal=APP_COLOR=blue
+  - |
+    cat <<EOF > settings.yaml
+    apiVersion: v1
+    kind: Pod
+    metadata:
+      name: settings
+    spec:
+      containers:
+      - name: settings
+        image: nginx:1.27
+        envFrom:
+        - configMapRef:
+            name: app-config
+    EOF
+  - kubectl apply -f settings.yaml
+learned: |
+  Environment variables are read once when the container starts. If you change
+  the ConfigMap later, restart the Pod to pick up the new values. ConfigMaps
+  mounted as files do update in place after a short delay.

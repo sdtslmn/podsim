@@ -1,0 +1,76 @@
+id: i02-cronjob
+title: Schedule work with a CronJob
+level: intermediate
+minutes: 8
+tracks: [ckad]
+topic: Workloads
+intro: |
+  A CronJob creates a Job on a schedule, and each Job runs Pods to
+  completion. History limits control how many finished Jobs are kept.
+
+  You can also start a Job from a CronJob's template right away, which is
+  handy for testing it without waiting for the schedule.
+tasks:
+  - Create a CronJob named `backup` that runs every 15 minutes with the image `busybox:1.36` and the command `sh -c 'echo backup done'`.
+  - Keep only 2 successful and 1 failed Job in its history.
+  - Each Job must be stopped if it runs longer than 30 seconds (activeDeadlineSeconds on the Job spec).
+  - Start a Job named `backup-manual` from the CronJob now, and let it complete.
+checks:
+  - name: CronJob backup runs every 15 minutes
+    kind: CronJob
+    resource: backup
+    path: .spec.schedule
+    matches: "^(\\*/15|0,15,30,45) \\* \\* \\* \\*$"
+  - name: Two successful Jobs are kept
+    kind: CronJob
+    resource: backup
+    path: .spec.successfulJobsHistoryLimit
+    equals: 2
+  - name: One failed Job is kept
+    kind: CronJob
+    resource: backup
+    path: .spec.failedJobsHistoryLimit
+    equals: 1
+  - name: Jobs stop after 30 seconds
+    kind: CronJob
+    resource: backup
+    path: .spec.jobTemplate.spec.activeDeadlineSeconds
+    equals: 30
+  - name: Job backup-manual completed
+    kind: Job
+    resource: backup-manual
+    path: .status.succeeded
+    equals: 1
+hints:
+  - "kubectl create cronjob backup --image=busybox:1.36 --schedule='*/15 * * * *' --dry-run=client -o yaml -- sh -c 'echo backup done' > cj.yaml"
+  - "History limits are on the CronJob spec. activeDeadlineSeconds goes under spec.jobTemplate.spec."
+  - "kubectl create job backup-manual --from=cronjob/backup"
+solution:
+  - |
+    cat <<EOF | kubectl apply -f -
+    apiVersion: batch/v1
+    kind: CronJob
+    metadata:
+      name: backup
+    spec:
+      schedule: "*/15 * * * *"
+      successfulJobsHistoryLimit: 2
+      failedJobsHistoryLimit: 1
+      jobTemplate:
+        spec:
+          activeDeadlineSeconds: 30
+          template:
+            spec:
+              restartPolicy: OnFailure
+              containers:
+              - name: backup
+                image: busybox:1.36
+                command: ["sh", "-c", "echo backup done"]
+    EOF
+  - kubectl create job backup-manual --from=cronjob/backup
+  - sleep 10
+learned: |
+  CronJob fields: schedule, concurrencyPolicy, history limits and the
+  jobTemplate. Job fields such as activeDeadlineSeconds, backoffLimit,
+  completions and parallelism go under jobTemplate.spec.
+  kubectl create job NAME --from=cronjob/CJ runs the template immediately.

@@ -1,0 +1,46 @@
+id: b12-service-dns
+title: Reach a Service by its DNS name
+level: beginner
+minutes: 10
+tracks: [kcna, ckad]
+topic: Services
+intro: |
+  Every Service gets a DNS name from the cluster DNS (CoreDNS):
+
+    SERVICE.NAMESPACE.svc.cluster.local
+
+  Inside the same namespace the short name `SERVICE` is enough. From another
+  namespace use at least `SERVICE.NAMESPACE`.
+
+  The Service `catalog` runs in the namespace `backend`. Your apps live in
+  `default`.
+setup:
+  - kubectl create namespace backend
+  - kubectl create deployment catalog -n backend --image=hashicorp/http-echo:1.0 -- /http-echo -text="catalog v1" -listen=:5678
+  - kubectl expose deployment catalog -n backend --port=80 --target-port=5678
+tasks:
+  - From a temporary busybox Pod in `default`, request `http://catalog` and see that the short name does not resolve there.
+  - Write the fully qualified DNS name of the Service to `dns.txt`.
+  - Create a Service named `catalog` in `default` of type ExternalName that points to that DNS name, so apps in `default` can use the short name.
+checks:
+  - name: dns.txt has the fully qualified name
+    command: cat dns.txt
+    outputMatches: "^\\s*catalog\\.backend\\.svc\\.cluster\\.local\\.?\\s*$"
+  - name: Service catalog in default is an ExternalName
+    kind: Service
+    resource: catalog
+    path: .spec.type
+    equals: ExternalName
+  - name: http://catalog works from default
+    command: kubectl run lab-check --rm -i --image=busybox:1.36 --restart=Never -- wget -qO- -T 2 http://catalog
+    outputMatches: catalog v1
+hints:
+  - "kubectl run tmp --rm -i --image=busybox:1.36 --restart=Never -- wget -qO- -T 2 http://catalog.backend"
+  - "kubectl create service externalname catalog --external-name=catalog.backend.svc.cluster.local"
+solution:
+  - echo catalog.backend.svc.cluster.local > dns.txt
+  - kubectl create service externalname catalog --external-name=catalog.backend.svc.cluster.local
+learned: |
+  The DNS search path in every Pod tries NAMESPACE.svc.cluster.local first,
+  which is why short names only work inside a namespace. An ExternalName
+  Service is just a DNS alias (a CNAME): no ports, no endpoints, no proxying.

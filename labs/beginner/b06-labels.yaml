@@ -1,0 +1,72 @@
+id: b06-labels
+title: Organize Pods with labels
+level: beginner
+minutes: 10
+tracks: [kcna, ckad, cka]
+topic: Organizing resources
+intro: |
+  Labels are key and value pairs on objects. Kubernetes uses them to group
+  things: a Service sends traffic to the Pods its selector matches, and a
+  Deployment manages the Pods whose labels match its selector.
+
+    kubectl get pods --show-labels
+    kubectl get pods -l tier=frontend
+    kubectl label pod NAME key=value
+    kubectl label pod NAME key=new --overwrite
+    kubectl label pod NAME key-          # removes the label
+
+  Annotations look similar but are not used for selection. They hold notes
+  and data for tools.
+setup:
+  - kubectl run web-1 --image=nginx:1.29 --labels=app=web,tier=frontend
+  - kubectl run web-2 --image=nginx:1.29 --labels=app=web,tier=frontend
+  - kubectl run cache --image=redis:7 --labels=app=cache,tier=backend
+  - kubectl run db --image=redis:7 --labels=app=db,tier=backend
+tasks:
+  - Add the label `env=prod` to every Pod that has `tier=frontend`, with one command.
+  - Change the `tier` label of `db` to `database`.
+  - Remove the label `app` from `cache`.
+  - Annotate `db` with `owner=team-data`.
+  - After those changes, write the names of all Pods that have `tier=backend` to `backend.txt` (`-o name` is fine).
+checks:
+  - name: web-1 has env=prod
+    kind: Pod
+    resource: web-1
+    path: .metadata.labels.env
+    equals: prod
+  - name: web-2 has env=prod
+    kind: Pod
+    resource: web-2
+    path: .metadata.labels.env
+    equals: prod
+  - name: db has tier=database
+    kind: Pod
+    resource: db
+    path: .metadata.labels.tier
+    equals: database
+  - name: cache has no app label
+    command: kubectl get pod cache -o jsonpath='{.metadata.labels.app}'
+    outputMatches: "^$"
+  - name: db is annotated with owner=team-data
+    kind: Pod
+    resource: db
+    path: .metadata.annotations.owner
+    equals: team-data
+  - name: backend.txt lists only cache
+    command: cat backend.txt
+    outputMatches: "^\\s*(pod/)?cache\\s*$"
+hints:
+  - "kubectl label pods -l tier=frontend env=prod labels every matching Pod."
+  - "Overwriting an existing label needs --overwrite. Removing one uses a trailing dash: kubectl label pod cache app-"
+  - "kubectl get pods -l tier=backend -o name > backend.txt"
+solution:
+  - kubectl label pods -l tier=frontend env=prod
+  - kubectl label pod db tier=database --overwrite
+  - kubectl label pod cache app-
+  - kubectl annotate pod db owner=team-data
+  - kubectl get pods -l tier=backend -o name > backend.txt
+learned: |
+  Selectors can combine labels (-l app=web,env=prod) and use sets
+  (-l 'tier in (frontend,backend)'). Relabeling a Pod so it no longer matches
+  its Deployment's selector makes the Deployment create a replacement: a
+  common trick to take a misbehaving Pod out of service for debugging.

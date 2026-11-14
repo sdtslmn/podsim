@@ -12,6 +12,7 @@ import { type Ctx, out, err, nsOf, notFoundError, singleTarget, kindOrThrow, ref
 import { runInContainer } from "./container.js";
 import { canI, parseAs, rulesFor } from "./rbac.js";
 import { toYaml } from "./printers.js";
+import { renderJsonPath } from "./jsonpath.js";
 import { kustomize } from "./kustomize.js";
 
 /** Resolve "pod-name", "pod/x", "deploy/x", "svc/x" to a concrete pod. */
@@ -289,7 +290,12 @@ export async function cmdConfig(ctx: Ctx, f: Flags): Promise<number> {
         preferences: {},
         users: [{ name: "kubernetes-admin", user: { "client-certificate-data": "DATA+OMITTED", "client-key-data": "DATA+OMITTED" } }],
       };
-      out(ctx, toYaml(cfg).trimEnd());
+      const output = f.str("output");
+      if (output?.startsWith("jsonpath=")) {
+        ctx.io.stdout(renderJsonPath(output.slice(9).replace(/^'|'$/g, ""), cfg));
+        return 0;
+      }
+      out(ctx, output === "json" ? JSON.stringify(cfg, null, 4) : toYaml(cfg).trimEnd());
       return 0;
     }
     default:

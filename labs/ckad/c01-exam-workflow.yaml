@@ -1,0 +1,77 @@
+id: c01-exam-workflow
+title: Work like the exam environment expects
+level: advanced
+minutes: 10
+tracks: [ckad, cka]
+topic: Exam skills
+intro: |
+  The CKAD is a race against the clock, so the workflow matters as much as
+  the knowledge:
+
+  - Each task names a host (`ssh ckad00017`) and often a namespace. Set the
+    namespace on your context once instead of typing `-n` every time.
+  - `k` is an alias for `kubectl`. Generate manifests instead of typing them:
+    `export do="--dry-run=client -o yaml"`, then
+    `k run web --image=nginx $do > web.yaml`.
+  - `kubectl explain RESOURCE.FIELD` finds field names faster than the docs.
+  - Delete things you no longer need right away:
+    `export now="--force --grace-period=0"`, then `k delete pod x $now`.
+
+  Try the mock exam (Mock exam tab, or `podsim exam`) once these feel
+  natural.
+setup:
+  - kubectl create namespace exam-ns
+  - kubectl run stuck -n exam-ns --image=nginx:1.29
+tasks:
+  - Make `exam-ns` the default namespace of your current context.
+  - Generate a manifest for a Pod named `quick` (image `nginx:1.29`) into `quick.yaml` without creating the Pod, add a memory limit of 128Mi to it, then create the Pod from the file in `exam-ns`.
+  - Delete the Pod `stuck` in `exam-ns` immediately, without waiting for a graceful shutdown.
+  - Use `kubectl explain` to find the field under `pod.spec` that sets how many seconds a Pod gets to shut down, and write its name to `field.txt`.
+checks:
+  - name: The current context uses exam-ns
+    command: kubectl config view --minify -o jsonpath='{..namespace}'
+    outputMatches: "^exam-ns$"
+  - name: quick.yaml is a Pod manifest
+    command: "grep -c 'kind: Pod' quick.yaml"
+    outputMatches: "^1"
+  - name: Pod quick has a 128Mi memory limit
+    kind: Pod
+    namespace: exam-ns
+    resource: quick
+    path: .spec.containers[0].resources.limits.memory
+    equals: 128Mi
+  - name: Pod stuck is gone
+    kind: Pod
+    namespace: exam-ns
+    resource: stuck
+    expect: absent
+  - name: field.txt names the field
+    command: cat field.txt
+    outputMatches: "^\\s*terminationGracePeriodSeconds\\s*$"
+hints:
+  - "kubectl config set-context --current --namespace=exam-ns"
+  - "kubectl run quick --image=nginx:1.29 --dry-run=client -o yaml > quick.yaml, add resources: limits: memory: 128Mi under the container, then kubectl apply -f quick.yaml"
+  - "kubectl delete pod stuck --force --grace-period=0, and kubectl explain pod.spec | grep -i grace"
+solution:
+  - kubectl config set-context --current --namespace=exam-ns
+  - |
+    cat <<EOF > quick.yaml
+    apiVersion: v1
+    kind: Pod
+    metadata:
+      name: quick
+    spec:
+      containers:
+      - name: quick
+        image: nginx:1.29
+        resources:
+          limits:
+            memory: 128Mi
+    EOF
+  - kubectl apply -f quick.yaml
+  - kubectl delete pod stuck --force --grace-period=0
+  - echo terminationGracePeriodSeconds > field.txt
+learned: |
+  In the exam, switch namespace (or host) at the start of every task and
+  read the task twice: names, namespaces, labels and ports are graded
+  exactly. Flag long tasks and come back to them; 66% passes.

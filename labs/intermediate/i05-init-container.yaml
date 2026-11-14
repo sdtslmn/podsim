@@ -1,0 +1,67 @@
+id: i05-init-container
+title: Prepare content with an init container
+level: intermediate
+minutes: 10
+tracks: [ckad]
+topic: Multi-container Pods
+intro: |
+  Init containers run to completion before the app containers start. A
+  common use is to prepare files in a shared `emptyDir` volume that the
+  main container then serves.
+tasks:
+  - Create a Pod named `web` with an `emptyDir` volume named `content`.
+  - Add an init container named `fetch` (image `busybox:1.36`) that writes the text `hello from init` to `/work/index.html`, with the volume mounted at `/work`.
+  - The main container `nginx` (image `nginx:1.29`) mounts the same volume at `/usr/share/nginx/html`.
+checks:
+  - name: Pod web has an init container named fetch
+    kind: Pod
+    resource: web
+    path: .spec.initContainers[0].name
+    equals: fetch
+  - name: Pod web uses an emptyDir volume
+    kind: Pod
+    resource: web
+    path: .spec.volumes[*].emptyDir
+    contains: "{"
+  - name: Pod web is Running
+    kind: Pod
+    resource: web
+    path: .status.phase
+    equals: Running
+  - name: nginx serves the file written by the init container
+    command: kubectl exec web -c nginx -- cat /usr/share/nginx/html/index.html
+    outputMatches: hello from init
+hints:
+  - "Start from kubectl run web --image=nginx:1.29 --dry-run=client -o yaml > web.yaml and rename the container to nginx."
+  - "Add spec.volumes with name content and emptyDir: {}, then initContainers with the same volumeMounts shape as containers."
+  - "The init command can be: command: [\"sh\", \"-c\", \"echo 'hello from init' > /work/index.html\"]"
+solution:
+  - |
+    cat <<EOF | kubectl apply -f -
+    apiVersion: v1
+    kind: Pod
+    metadata:
+      name: web
+    spec:
+      volumes:
+      - name: content
+        emptyDir: {}
+      initContainers:
+      - name: fetch
+        image: busybox:1.36
+        command: ["sh", "-c", "echo 'hello from init' > /work/index.html"]
+        volumeMounts:
+        - name: content
+          mountPath: /work
+      containers:
+      - name: nginx
+        image: nginx:1.29
+        volumeMounts:
+        - name: content
+          mountPath: /usr/share/nginx/html
+    EOF
+  - sleep 10
+learned: |
+  The Pod stays in Init:0/1 until every init container exits with code 0.
+  If an init container fails, the kubelet restarts it (Init:CrashLoopBackOff)
+  and the app containers never start. An emptyDir lives as long as the Pod.

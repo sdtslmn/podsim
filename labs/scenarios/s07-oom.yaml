@@ -1,0 +1,97 @@
+id: s07-oom
+title: "Reports keep crashing: an OOMKilled container"
+level: scenario
+minutes: 12
+tracks: [ckad, cka]
+topic: Real-life scenarios
+intro: |
+  The `renderer` Deployment in the namespace `reports` generates monthly PDF
+  reports. Since the data grew, its Pod restarts every few seconds and no
+  report finishes. The developers say the app needs about 100Mi of memory
+  for current data, and up to 200Mi at month end.
+
+  The namespace has a LimitRange that caps containers at 512Mi.
+setup:
+  - kubectl create namespace reports
+  - |
+    cat <<EOF | kubectl apply -f -
+    apiVersion: v1
+    kind: LimitRange
+    metadata:
+      name: caps
+      namespace: reports
+    spec:
+      limits:
+      - type: Container
+        max:
+          memory: 512Mi
+    ---
+    apiVersion: apps/v1
+    kind: Deployment
+    metadata:
+      name: renderer
+      namespace: reports
+    spec:
+      replicas: 1
+      selector:
+        matchLabels:
+          app: renderer
+      template:
+        metadata:
+          labels:
+            app: renderer
+        spec:
+          containers:
+          - name: renderer
+            image: polinux/stress
+            command: ["stress", "--vm", "1", "--vm-bytes", "100M"]
+            resources:
+              requests:
+                memory: 32Mi
+              limits:
+                memory: 64Mi
+    EOF
+settle: 30
+tasks:
+  - Find out why the `renderer` container keeps restarting, and write the termination reason Kubernetes reports to `reason.txt`.
+  - Give the container a memory request of 128Mi and a limit of 256Mi, which covers month end and stays inside the LimitRange.
+  - Make sure the new Pod runs without restarting.
+checks:
+  - name: reason.txt has the termination reason
+    command: cat reason.txt
+    outputMatches: "^\\s*OOMKilled\\s*$"
+  - name: The memory limit is 256Mi
+    kind: Deployment
+    namespace: reports
+    resource: renderer
+    path: .spec.template.spec.containers[0].resources.limits.memory
+    equals: 256Mi
+  - name: The memory request is 128Mi
+    kind: Deployment
+    namespace: reports
+    resource: renderer
+    path: .spec.template.spec.containers[0].resources.requests.memory
+    equals: 128Mi
+  - name: renderer is available
+    kind: Deployment
+    namespace: reports
+    resource: renderer
+    path: .status.availableReplicas
+    equals: 1
+  - name: The new Pod has not restarted
+    command: kubectl get pods -n reports -l app=renderer -o jsonpath='{.items[*].status.containerStatuses[0].restartCount}'
+    outputMatches: "^0$"
+hints:
+  - "kubectl describe pod -n reports -l app=renderer: Last State shows Terminated, Reason: OOMKilled, Exit Code: 137."
+  - "kubectl get pod -n reports -l app=renderer -o jsonpath='{.items[0].status.containerStatuses[0].lastState.terminated.reason}' > reason.txt"
+  - "kubectl set resources deployment renderer -n reports --requests=memory=128Mi --limits=memory=256Mi"
+solution:
+  - kubectl get pod -n reports -l app=renderer -o jsonpath='{.items[0].status.containerStatuses[0].lastState.terminated.reason}' > reason.txt
+  - kubectl set resources deployment renderer -n reports --requests=memory=128Mi --limits=memory=256Mi
+  - kubectl rollout status deployment/renderer -n reports --timeout=60s
+  - sleep 20
+learned: |
+  Exit code 137 is 128 + 9: the process was killed with SIGKILL, here by the
+  kernel's OOM killer when the container went over its memory limit. CPU
+  limits throttle; memory limits kill. Size memory limits from measured
+  peaks (kubectl top) plus headroom.

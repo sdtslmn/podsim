@@ -1,0 +1,78 @@
+id: i08-config-files
+title: Mount configuration files from a ConfigMap
+level: intermediate
+minutes: 10
+tracks: [ckad]
+topic: Storage and configuration
+intro: |
+  A ConfigMap mounted as a volume shows each key as a file. Two options give
+  finer control:
+
+  - `items` picks which keys appear, and under which file names.
+  - `subPath` mounts a single file into a directory without hiding the
+    other files already there.
+
+  Your work folder has `index.html` and `app.properties`.
+files:
+  index.html: |
+    <h1>Welcome to the store</h1>
+  app.properties: |
+    currency=EUR
+    max.cart.items=50
+tasks:
+  - Create a ConfigMap named `site` from the files `index.html` and `app.properties`.
+  - Create a Pod named `web` with the image `nginx:1.29`.
+  - Mount only the key `index.html` of `site` into `/usr/share/nginx/html`.
+  - Mount the key `app.properties` as the single file `/etc/app/app.properties` with `subPath`.
+checks:
+  - name: ConfigMap site has both keys
+    kind: ConfigMap
+    resource: site
+    path: .data['app.properties']
+    contains: currency=EUR
+  - name: nginx serves the page from the ConfigMap
+    command: kubectl exec web -- cat /usr/share/nginx/html/index.html
+    outputMatches: Welcome to the store
+  - name: Only index.html is in the web root
+    command: kubectl exec web -- ls /usr/share/nginx/html
+    outputMatches: "^index.html\\s*$"
+  - name: app.properties is mounted as a file
+    command: kubectl exec web -- cat /etc/app/app.properties
+    outputMatches: max.cart.items=50
+hints:
+  - "kubectl create configmap site --from-file=index.html --from-file=app.properties"
+  - "Use two volumes from the same ConfigMap: one with items: [{key: index.html, path: index.html}], one mounted with subPath: app.properties."
+solution:
+  - kubectl create configmap site --from-file=index.html --from-file=app.properties
+  - |
+    cat <<EOF | kubectl apply -f -
+    apiVersion: v1
+    kind: Pod
+    metadata:
+      name: web
+    spec:
+      volumes:
+      - name: html
+        configMap:
+          name: site
+          items:
+          - key: index.html
+            path: index.html
+      - name: props
+        configMap:
+          name: site
+      containers:
+      - name: web
+        image: nginx:1.29
+        volumeMounts:
+        - name: html
+          mountPath: /usr/share/nginx/html
+        - name: props
+          mountPath: /etc/app/app.properties
+          subPath: app.properties
+    EOF
+  - sleep 10
+learned: |
+  Files from a ConfigMap volume are updated in place a while after the
+  ConfigMap changes, so apps that re-read their config pick up changes
+  without a restart. Files mounted with subPath are not updated.

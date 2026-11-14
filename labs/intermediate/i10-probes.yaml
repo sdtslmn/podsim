@@ -1,0 +1,72 @@
+id: i10-probes
+title: Add readiness and liveness probes
+level: intermediate
+minutes: 10
+tracks: [ckad]
+topic: Health and resources
+intro: |
+  Probes tell the kubelet how healthy a container is. A failing readiness
+  probe takes the Pod out of its Services; a failing liveness probe gets
+  the container restarted.
+
+  The Deployment `catalog` runs nginx on port 80 without any probes.
+setup:
+  - kubectl create deployment catalog --image=nginx:1.29 --port=80
+tasks:
+  - Add a readiness probe to the container `nginx` of `catalog` that sends an HTTP GET to path `/` on port 80 every 5 seconds.
+  - Add a liveness probe that opens a TCP connection to port 80, starting 10 seconds after the container starts.
+  - Wait until the rollout has finished.
+checks:
+  - name: The readiness probe is an HTTP GET on /
+    kind: Deployment
+    resource: catalog
+    path: .spec.template.spec.containers[0].readinessProbe.httpGet.path
+    equals: /
+  - name: The readiness probe runs every 5 seconds
+    kind: Deployment
+    resource: catalog
+    path: .spec.template.spec.containers[0].readinessProbe.periodSeconds
+    equals: 5
+  - name: The liveness probe checks TCP port 80
+    kind: Deployment
+    resource: catalog
+    path: .spec.template.spec.containers[0].livenessProbe.tcpSocket.port
+    equals: 80
+  - name: The liveness probe waits 10 seconds
+    kind: Deployment
+    resource: catalog
+    path: .spec.template.spec.containers[0].livenessProbe.initialDelaySeconds
+    equals: 10
+  - name: The new Pod is ready
+    kind: Deployment
+    resource: catalog
+    path: .status.updatedReplicas
+    equals: 1
+hints:
+  - "kubectl get deploy catalog -o yaml > catalog.yaml, then add readinessProbe and livenessProbe next to image."
+  - "kubectl explain pod.spec.containers.readinessProbe lists the fields."
+solution:
+  - |
+    cat <<EOF > patch.yaml
+    spec:
+      template:
+        spec:
+          containers:
+          - name: nginx
+            readinessProbe:
+              httpGet:
+                path: /
+                port: 80
+              periodSeconds: 5
+            livenessProbe:
+              tcpSocket:
+                port: 80
+              initialDelaySeconds: 10
+    EOF
+  - kubectl patch deployment catalog --patch-file=patch.yaml
+  - kubectl rollout status deployment/catalog --timeout=120s
+learned: |
+  Readiness controls traffic, liveness controls restarts, and a startup
+  probe holds both off while a slow app boots. Keep liveness probes simple:
+  a liveness probe that depends on a database restarts healthy containers
+  whenever the database has a hiccup.

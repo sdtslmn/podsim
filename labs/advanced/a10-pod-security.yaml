@@ -1,0 +1,70 @@
+id: a10-pod-security
+title: Meet the restricted Pod Security Standard
+level: advanced
+minutes: 12
+tracks: [ckad, cks]
+topic: Hardening
+intro: |
+  Pod Security Admission checks Pods against three standards: privileged,
+  baseline and restricted. A namespace label chooses the standard:
+
+    pod-security.kubernetes.io/enforce=restricted
+
+  Pods that break the rules are rejected. For a Deployment that means the
+  ReplicaSet cannot create Pods, and the reason only shows up in its events.
+
+  The namespace `payments` enforces the restricted standard, and the
+  Deployment `ledger` there has no Pods.
+setup:
+  - kubectl create namespace payments
+  - kubectl label namespace payments pod-security.kubernetes.io/enforce=restricted
+  - kubectl create deployment ledger -n payments --image=busybox:1.36 -- sleep 3600
+tasks:
+  - Find out why the Deployment `ledger` has no Pods.
+  - Change the Deployment so its Pods meet the restricted standard. Keep the image and command, and do not change the namespace labels.
+checks:
+  - name: The namespace still enforces restricted
+    kind: Namespace
+    resource: payments
+    path: .metadata.labels['pod-security.kubernetes.io/enforce']
+    equals: restricted
+  - name: ledger is available
+    kind: Deployment
+    namespace: payments
+    resource: ledger
+    path: .status.availableReplicas
+    equals: 1
+  - name: The Pods run as non-root
+    kind: Deployment
+    namespace: payments
+    resource: ledger
+    path: .spec.template.spec.securityContext.runAsNonRoot
+    equals: true
+hints:
+  - "kubectl describe rs -n payments shows FailedCreate with every rule the Pod breaks."
+  - "Restricted needs runAsNonRoot (and a non-zero runAsUser for images that run as root), allowPrivilegeEscalation: false, capabilities drop ALL and seccompProfile type RuntimeDefault."
+solution:
+  - |
+    cat <<EOF > patch.yaml
+    spec:
+      template:
+        spec:
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 1000
+            seccompProfile:
+              type: RuntimeDefault
+          containers:
+          - name: busybox
+            securityContext:
+              allowPrivilegeEscalation: false
+              capabilities:
+                drop: ["ALL"]
+    EOF
+  - kubectl patch deployment ledger -n payments --patch-file patch.yaml
+  - kubectl rollout status deployment/ledger -n payments --timeout=60s
+learned: |
+  Use pod-security.kubernetes.io/warn and audit labels first to see what
+  would break before you enforce. The baseline standard blocks the clearly
+  dangerous settings (privileged, host namespaces); restricted adds the
+  hardening rules most apps can meet with a few lines of securityContext.

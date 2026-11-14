@@ -1,0 +1,71 @@
+id: i12-quota
+title: Run a Pod inside a ResourceQuota
+level: intermediate
+minutes: 8
+tracks: [ckad]
+topic: Health and resources
+intro: |
+  A ResourceQuota caps what a namespace may use. Once a quota covers CPU and
+  memory, every new Pod in the namespace must declare requests and limits
+  for them, or the API server rejects it.
+
+  The namespace `team-a` has such a quota.
+setup:
+  - kubectl create namespace team-a
+  - kubectl create quota team-a-quota -n team-a --hard=requests.cpu=1,requests.memory=1Gi,limits.cpu=2,limits.memory=2Gi,pods=5
+tasks:
+  - Try `kubectl run worker -n team-a --image=nginx:1.29` and read the error.
+  - Create the Pod `worker` in `team-a` with the image `nginx:1.29`, requesting 100m CPU and 128Mi memory, limited to 200m CPU and 256Mi memory.
+checks:
+  - name: Pod worker requests 100m CPU
+    kind: Pod
+    namespace: team-a
+    resource: worker
+    path: .spec.containers[0].resources.requests.cpu
+    equals: 100m
+  - name: Pod worker is limited to 256Mi memory
+    kind: Pod
+    namespace: team-a
+    resource: worker
+    path: .spec.containers[0].resources.limits.memory
+    equals: 256Mi
+  - name: Pod worker is Running
+    kind: Pod
+    namespace: team-a
+    resource: worker
+    path: .status.phase
+    equals: Running
+  - name: The quota counts the Pod
+    kind: ResourceQuota
+    namespace: team-a
+    resource: team-a-quota
+    path: .status.used['requests.cpu']
+    equals: 100m
+hints:
+  - "kubectl run worker -n team-a --image=nginx:1.29 --dry-run=client -o yaml > worker.yaml, then add resources to the container."
+  - "kubectl describe quota -n team-a shows used and hard values."
+solution:
+  - |
+    cat <<EOF | kubectl apply -f -
+    apiVersion: v1
+    kind: Pod
+    metadata:
+      name: worker
+      namespace: team-a
+    spec:
+      containers:
+      - name: worker
+        image: nginx:1.29
+        resources:
+          requests:
+            cpu: 100m
+            memory: 128Mi
+          limits:
+            cpu: 200m
+            memory: 256Mi
+    EOF
+  - sleep 10
+learned: |
+  "failed quota: must specify limits.cpu..." means the quota needs values the
+  Pod does not set. A LimitRange with defaults fills them in automatically.
+  Requests are what the scheduler reserves; limits are the ceiling at run time.

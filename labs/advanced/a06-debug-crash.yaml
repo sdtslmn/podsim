@@ -1,0 +1,63 @@
+id: a06-debug-crash
+title: Debug a crashing Deployment
+level: advanced
+minutes: 10
+tracks: [ckad]
+topic: Observability and debugging
+intro: |
+  The Deployment `payment` never becomes available. Its container starts
+  and exits again. The cause is in the container's own output.
+
+  `kubectl logs` shows the current container; `--previous` shows the one
+  that crashed before it.
+setup:
+  - |
+    cat <<EOF | kubectl apply -f -
+    apiVersion: apps/v1
+    kind: Deployment
+    metadata:
+      name: payment
+    spec:
+      replicas: 1
+      selector:
+        matchLabels:
+          app: payment
+      template:
+        metadata:
+          labels:
+            app: payment
+        spec:
+          containers:
+          - name: payment
+            image: busybox:1.36
+            command: ["sh", "-c", "if [ -z \"\$DB_HOST\" ]; then echo 'fatal: DB_HOST is not set'; exit 1; fi; echo \"connected to \$DB_HOST\"; sleep 3600"]
+    EOF
+settle: 30
+tasks:
+  - Find out why the `payment` container crashes.
+  - Fix the Deployment by setting the environment variable `DB_HOST` to `db.payments.svc.cluster.local`.
+  - Make sure the Deployment becomes available.
+checks:
+  - name: DB_HOST is set on the Deployment
+    kind: Deployment
+    resource: payment
+    path: .spec.template.spec.containers[0].env[0].value
+    equals: db.payments.svc.cluster.local
+  - name: Deployment payment is available
+    kind: Deployment
+    resource: payment
+    path: .status.availableReplicas
+    equals: 1
+  - name: The app connected
+    command: kubectl logs deploy/payment
+    outputMatches: connected to db.payments.svc.cluster.local
+hints:
+  - "kubectl get pods -l app=payment, then kubectl logs on the pod (add --previous if it is restarting)."
+  - "kubectl set env deployment/payment DB_HOST=db.payments.svc.cluster.local"
+solution:
+  - kubectl set env deployment/payment DB_HOST=db.payments.svc.cluster.local
+  - kubectl rollout status deployment/payment --timeout=60s
+learned: |
+  The troubleshooting order is get (state), describe (events), logs (the
+  app's own words). CrashLoopBackOff means the process exits; the logs of
+  the previous instance usually say why.

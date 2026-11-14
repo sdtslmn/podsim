@@ -1,0 +1,100 @@
+id: i22-kustomize
+title: Create a staging overlay with Kustomize
+level: intermediate
+minutes: 10
+tracks: [ckad]
+topic: Packaging and updates
+intro: |
+  Kustomize builds variants of the same manifests without templates. A
+  base holds the common resources and an overlay changes them for one
+  environment. kubectl has Kustomize built in: `kubectl kustomize DIR`
+  prints the result and `kubectl apply -k DIR` applies it.
+
+  The base is in `base/`.
+files:
+  base/deployment.yaml: |
+    apiVersion: apps/v1
+    kind: Deployment
+    metadata:
+      name: api
+    spec:
+      replicas: 1
+      selector:
+        matchLabels:
+          app: api
+      template:
+        metadata:
+          labels:
+            app: api
+        spec:
+          containers:
+          - name: api
+            image: nginx:1.27
+  base/service.yaml: |
+    apiVersion: v1
+    kind: Service
+    metadata:
+      name: api
+    spec:
+      selector:
+        app: api
+      ports:
+      - port: 80
+  base/kustomization.yaml: |
+    resources:
+    - deployment.yaml
+    - service.yaml
+setup:
+  - kubectl create namespace staging
+tasks:
+  - Create an overlay in `overlays/staging` that uses `../../base`.
+  - The overlay puts everything in the namespace `staging`, prefixes every name with `staging-`, runs 2 replicas and uses the image `nginx:1.29`.
+  - Apply the overlay.
+checks:
+  - name: Deployment staging-api exists in staging
+    kind: Deployment
+    namespace: staging
+    resource: staging-api
+    expect: exists
+  - name: It runs 2 ready replicas
+    kind: Deployment
+    namespace: staging
+    resource: staging-api
+    path: .status.readyReplicas
+    equals: 2
+  - name: It uses nginx:1.29
+    kind: Deployment
+    namespace: staging
+    resource: staging-api
+    path: .spec.template.spec.containers[0].image
+    equals: nginx:1.29
+  - name: Service staging-api exists in staging
+    kind: Service
+    namespace: staging
+    resource: staging-api
+    expect: exists
+hints:
+  - "The overlay is a kustomization.yaml with resources: [../../base], namespace:, namePrefix:, replicas: and images: fields."
+  - "replicas: [{name: api, count: 2}] and images: [{name: nginx, newTag: '1.29'}] use the names from the base."
+  - "Preview with kubectl kustomize overlays/staging, then kubectl apply -k overlays/staging"
+solution:
+  - |
+    mkdir -p overlays/staging
+    cat <<EOF > overlays/staging/kustomization.yaml
+    resources:
+    - ../../base
+    namespace: staging
+    namePrefix: staging-
+    replicas:
+    - name: api
+      count: 2
+    images:
+    - name: nginx
+      newTag: "1.29"
+    EOF
+  - kubectl apply -k overlays/staging
+  - sleep 10
+learned: |
+  Overlays stack: a production overlay can reuse the same base with other
+  names, replicas and images. Kustomize also generates ConfigMaps and
+  Secrets with a content hash in the name, so changing them rolls the Pods.

@@ -1,0 +1,53 @@
+id: b01-cluster-tour
+title: Take a tour of the cluster
+level: beginner
+minutes: 8
+tracks: [kcna, ckad, cka]
+topic: First steps
+intro: |
+  A Kubernetes cluster is a set of machines called nodes. The control plane
+  node runs the components that manage the cluster (the API server, the
+  scheduler, etcd); the worker nodes run your applications.
+
+  You talk to the cluster with `kubectl`. Every command goes to the API
+  server, which answers with the current state. Start by looking around:
+
+    kubectl get nodes
+    kubectl get nodes -o wide
+    kubectl get pods -n kube-system
+    kubectl api-resources
+
+  In this lab you answer a few questions by writing each answer into a file
+  in your work folder, for example `echo 3 > nodes.txt`.
+tasks:
+  - Find how many nodes the cluster has and write the number to `nodes.txt`.
+  - Find the name of the control plane node and write it to `control-plane.txt`.
+  - Find the internal IP address of `node01` and write it to `node01-ip.txt`.
+  - Find the API group that Deployments belong to (the part before the slash in the APIVERSION column of `kubectl api-resources`) and write it to `deployments-group.txt`.
+checks:
+  - name: nodes.txt has the number of nodes
+    command: cat nodes.txt
+    outputMatches: "^\\s*3\\s*$"
+  - name: control-plane.txt names the control plane node
+    command: cat control-plane.txt
+    outputMatches: "^\\s*controlplane\\s*$"
+  - name: node01-ip.txt has node01's internal IP
+    command: "test \"$(cat node01-ip.txt)\" = \"$(kubectl get node node01 -o jsonpath='{.status.addresses[0].address}')\""
+    exitCode: 0
+  - name: deployments-group.txt has the API group of Deployments
+    command: cat deployments-group.txt
+    outputMatches: "^\\s*apps\\s*$"
+hints:
+  - "kubectl get nodes lists the nodes. The ROLES column shows which one is the control plane."
+  - "kubectl get nodes -o wide adds the INTERNAL-IP column."
+  - "kubectl api-resources | grep deployments shows apps/v1: the group is apps."
+solution:
+  - echo 3 > nodes.txt
+  - echo controlplane > control-plane.txt
+  - kubectl get node node01 -o jsonpath='{.status.addresses[0].address}' > node01-ip.txt
+  - echo apps > deployments-group.txt
+learned: |
+  kubectl get shows lists, -o wide adds columns, and -o yaml or -o jsonpath
+  shows any field. kube-system holds the cluster's own components; you
+  rarely change anything there, but it is the first place to look when the
+  cluster itself misbehaves.

@@ -186,7 +186,7 @@ export class Shell {
   }
 
   private expandVars(text: string): string {
-    return text.replace(/\$\{(\w+)\}|\$(\w+)/g, (_, a, b) => this.vars.get(a ?? b) ?? "");
+    return text.replace(/\$\{(\w+|\?)\}|\$(\w+|\?)/g, (_, a, b) => this.vars.get(a ?? b) ?? "");
   }
 
   private tokenize(line: string): Token[] {
@@ -228,7 +228,7 @@ export class Shell {
         continue;
       }
       if (ch === "$") {
-        const m = line.slice(i).match(/^\$\{(\w+)\}|^\$(\w+)/);
+        const m = line.slice(i).match(/^\$\{(\w+|\?)\}|^\$(\w+|\?)/);
         if (m) {
           const value = this.vars.get(m[1] ?? m[2]) ?? "";
           // Unquoted expansion splits on whitespace, like a real shell.
@@ -317,8 +317,70 @@ export class Shell {
     return out;
   }
 
+  /** Split a line on top-level ; && || (outside quotes and $(...)), keeping the operators. */
+  private splitList(line: string): { text: string; op?: string }[] {
+    const out: { text: string; op?: string }[] = [];
+    let cur = "";
+    let quote: string | null = null;
+    let depth = 0;
+    for (let i = 0; i < line.length; i++) {
+      const c = line[i];
+      if (quote) {
+        if (c === quote) quote = null;
+        else if (c === "\\" && quote === '"') cur += c + (line[++i] ?? "");
+        if (c !== "\\" || quote === "'") cur += c;
+        continue;
+      }
+      if (c === "'" || c === '"') {
+        quote = c;
+        cur += c;
+        continue;
+      }
+      if (c === "\\") {
+        cur += c + (line[++i] ?? "");
+        continue;
+      }
+      if (c === "$" && line[i + 1] === "(") depth++;
+      else if (c === ")" && depth > 0) depth--;
+      if (depth === 0) {
+        const two = line.slice(i, i + 2);
+        if (two === "&&" || two === "||") {
+          out.push({ text: cur, op: two });
+          cur = "";
+          i++;
+          continue;
+        }
+        if (c === ";") {
+          out.push({ text: cur, op: ";" });
+          cur = "";
+          continue;
+        }
+      }
+      cur += c;
+    }
+    out.push({ text: cur });
+    return out;
+  }
+
   private async runLine(line: string, io: IO, heredoc?: string): Promise<number> {
-    if (/\$\((?!\()|`/.test(line)) line = await this.substitute(line, io);
+    if (/\$\((?!\()|`/.test(line)) {
+      // Substitute each command just before it runs, so earlier commands' effects are visible.
+      const parts = this.splitList(line);
+      if (parts.length > 1) {
+        let code = 0;
+        let prevOp: string | undefined;
+        for (let k = 0; k < parts.length; k++) {
+          if (k > 0 && ((prevOp === "&&" && code !== 0) || (prevOp === "||" && code === 0))) {
+            prevOp = parts[k].op;
+            continue;
+          }
+          if (parts[k].text.trim()) code = await this.runLine(parts[k].text, io, k === 0 ? heredoc : undefined);
+          prevOp = parts[k].op;
+        }
+        return code;
+      }
+      line = await this.substitute(line, io);
+    }
     const tokens = this.tokenize(line);
     // Split into command lists by ; && ||
     const lists: { tokens: Token[]; op?: string }[] = [];
@@ -343,6 +405,7 @@ export class Shell {
         continue;
       }
       if (l.tokens.length) code = await this.runPipeline(l.tokens, io, first ? heredoc : undefined);
+      this.vars.set("?", String(code));
       prevOp = l.op;
       first = false;
     }

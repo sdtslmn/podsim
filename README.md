@@ -1,6 +1,6 @@
 # PodSim
 
-A Kubernetes training simulator. Practice `kubectl` on a simulated cluster, in your terminal or in the browser, with guided labs that check your work automatically, a CKAD lab track for every exam domain, and a timed mock exam in the style of the real one.
+A Kubernetes training simulator. Practice `kubectl` on a simulated cluster, in your terminal or in the browser, along a training path from your first Pod to real-life production scenarios. Every lab checks your work automatically, and a CKAD track with two timed mock exams prepares you for the certification.
 
 Nothing here runs real containers. The simulator models how Kubernetes objects behave: the scheduler places Pods on nodes, the kubelet pulls images and starts containers, Deployments roll out new ReplicaSets, Services collect endpoints. You see the same states, events and error messages a real cluster gives you, without installing anything or paying for a cluster.
 
@@ -28,8 +28,8 @@ npm run sim            # builds and opens the practice shell
 Inside the shell:
 
 ```
-controlplane:~$ labs           # list the labs
-controlplane:~$ lab 1          # start the first lab
+controlplane:~$ labs           # the training path
+controlplane:~$ lab b1         # start the first lab
 controlplane:~$ kubectl run web --image=nginx
 controlplane:~$ check          # check your work
 controlplane:~$ hint           # stuck? get a hint
@@ -39,9 +39,9 @@ Other ways to start it:
 
 ```bash
 npm start                      # open the shell (after npm run build)
-npm start -- lab 3             # jump straight to lab 3
-npm start -- lab ckad-12       # a CKAD lab
-npm start -- exam              # the timed CKAD mock exam
+npm start -- lab b3            # jump straight to a lab
+npm start -- labs ckad         # the CKAD track
+npm start -- exam ckad-mock-2  # a timed CKAD mock exam
 npm start -- -c "kubectl get nodes -o wide"   # run one command and exit
 ```
 
@@ -59,40 +59,85 @@ The sandbox is a fresh simulated cluster with no lab attached. Type a command an
 
 In the browser, open the page, click Sandbox and put it on the projector. Learners can follow along on their own laptops with no setup.
 
-## Labs
+## Training path
 
-**Beginner** (first contact with Kubernetes):
+The labs form one path from zero to production. Each level is split into modules; start at B01 if Kubernetes is new to you, or jump to the level that fits.
 
-| # | Lab | Topic |
-|---|-----|-------|
-| 01 | Run your first Pod | Pods |
-| 02 | Write a Pod manifest | Pods |
-| 03 | Work in a namespace | Namespaces |
-| 04 | Create a Deployment | Deployments |
-| 05 | Scale a Deployment | Deployments |
-| 06 | Roll out a new version | Deployments |
-| 07 | Roll back a broken release | Troubleshooting |
-| 08 | Expose a Deployment with a Service | Services |
-| 09 | Fix a Pod that cannot pull its image | Troubleshooting |
-| 10 | Configure a Pod with a ConfigMap | Configuration |
+### 1. Beginner (16 labs)
 
-**CKAD track**, grouped by the five domains of the CKAD curriculum:
+Start from zero: what a cluster is, how to run and inspect Pods, and the
+everyday objects every Kubernetes user needs.
 
-| Domain (weight) | Labs |
+| Module | Labs |
 |---|---|
-| Application Design and Build (20%) | ckad-01 build, push and run an image · 02 CronJob · 03 parallel Job · 04 init container · 05 native sidecar · 06 PersistentVolumeClaim |
-| Application Deployment (20%) | ckad-07 rolling update strategy · 08 canary · 09 blue/green · 10 Helm install and upgrade · 11 Kustomize overlay |
-| Application Observability and Maintenance (15%) | ckad-12 readiness and liveness probes · 13 probe restart loop · 14 removed API versions · 15 debug a crash with logs · 16 `kubectl top` |
-| Application Environment, Configuration and Security (25%) | ckad-17 ConfigMaps and Secrets · 18 securityContext · 19 ServiceAccount and RBAC · 20 ResourceQuota · 21 custom resources |
-| Services and Networking (20%) | ckad-22 NetworkPolicy · 23 fix a Service and add a NodePort · 24 Ingress |
+| First steps | B01 Take a tour of the cluster · B02 Run your first Pod · B03 Write a Pod manifest · B04 Inspect a running Pod |
+| Organizing resources | B05 Work in a namespace · B06 Organize Pods with labels |
+| Deployments | B07 Create a Deployment · B08 Scale a Deployment · B09 Roll out a new version · B10 Roll back a broken release |
+| Services | B11 Expose a Deployment with a Service · B12 Reach a Service by its DNS name |
+| Configuration | B13 Configure a Pod with a ConfigMap · B14 Keep a password in a Secret |
+| Troubleshooting basics | B15 Fix a Pod that cannot pull its image · B16 Fix a Pod stuck in CrashLoopBackOff |
 
-Each lab is a YAML file in [`labs/`](labs). Writing a new one takes a few minutes, see [docs/writing-labs.md](docs/writing-labs.md).
+### 2. Intermediate (22 labs)
 
-## Mock exam
+The building blocks of real applications: the right workload for each
+job, storage, health checks, resources, access control, networking and
+packaging.
 
-`ckad-mock-1` has 16 weighted tasks across all five domains, a 120 minute timer and a 66% pass mark, like the real exam. You start on a base node and connect to each task's host with `ssh`, where a separate simulated cluster waits for you. At the end every task is scored automatically, with partial credit per check, and you get the breakdown and a reference solution for each task.
+| Module | Labs |
+|---|---|
+| Workloads | I01 Run a batch Job in parallel · I02 Schedule work with a CronJob · I03 Run an agent on every node with a DaemonSet · I04 Give each replica a stable identity |
+| Multi-container Pods | I05 Prepare content with an init container · I06 Add a log shipping sidecar |
+| Storage and configuration | I07 Keep data in a PersistentVolumeClaim · I08 Mount configuration files from a ConfigMap · I09 Configure a Pod with a ConfigMap and a Secret |
+| Health and resources | I10 Add readiness and liveness probes · I11 Stop a restart loop caused by a probe · I12 Run a Pod inside a ResourceQuota · I13 Set defaults and limits with a LimitRange |
+| Access and security | I14 Give an app read access with a ServiceAccount · I15 Lock down a Pod with a security context |
+| Networking | I16 Fix a Service that reaches nothing · I17 Allow only the backend to reach the database · I18 Route HTTP traffic with an Ingress |
+| Scheduling | I19 Place Pods on the right nodes |
+| Packaging and updates | I20 Tune a rolling update · I21 Deploy and upgrade a Helm chart · I22 Create a staging overlay with Kustomize |
 
-In the browser click **Mock exam**; in the terminal run `npm start -- exam`. The questions are original practice material mapped to the public curriculum, not exam questions.
+### 3. Advanced (12 labs)
+
+What production teams do every week: safe releases, custom images and
+APIs, debugging hard cases, autoscaling and hardening.
+
+| Module | Labs |
+|---|---|
+| Release strategies | A01 Send a share of traffic to a canary · A02 Switch traffic from blue to green |
+| Build and extend | A03 Build, push and run a container image · A04 Use a custom resource · A05 Update a manifest that uses a removed API |
+| Observability and debugging | A06 Debug a crashing Deployment · A07 Find the Pod that uses the most CPU · A08 Debug a container that has no shell · A09 Scale on CPU with a HorizontalPodAutoscaler |
+| Hardening | A10 Meet the restricted Pod Security Standard · A11 Lock down a namespace with default-deny policies · A12 Call the Kubernetes API from inside a Pod |
+
+### 4. Real-life scenarios (7 labs)
+
+Longer exercises that combine many topics, the way work arrives in real
+life: a launch, an outage, a traffic spike, an audit, a bad release,
+maintenance and a memory problem.
+
+| Module | Labs |
+|---|---|
+| Build and launch | S01 Launch day: deploy a three-tier shop |
+| Incidents | S02 Outage: checkout is down · S05 Bad release at 2 AM · S07 Reports keep crashing: an OOMKilled container |
+| Operations | S03 Traffic spike: autoscale without breaking the budget · S04 Security audit: close the findings · S06 Node maintenance window |
+
+## CKAD track
+
+The CKAD track reuses labs from every level, grouped by the five domains of the CKAD curriculum, plus exam skills and two timed mock exams. In the browser open the **CKAD track** tab; in the terminal run `labs ckad`.
+
+| Domain | Labs |
+|---|---|
+| Application Design and Build (20%) | B03, I01, I02, I03, I04, I05, I06, I07, A03 |
+| Application Deployment (20%) | B07, B09, B10, I20, I21, I22, A01, A02, S05 |
+| Application Observability and Maintenance (15%) | B04, B16, I10, I11, A05, A06, A07, A08, S02, S07 |
+| Application Environment, Configuration and Security (25%) | B13, B14, I08, I09, I12, I13, I14, I15, A04, A10, A12, S04 |
+| Services and Networking (20%) | B11, B12, I16, I17, I18, A11, S01 |
+| Exam skills | C01, C02 |
+
+Each lab is a YAML file in [`labs/`](labs), and [`labs/curriculum.yaml`](labs/curriculum.yaml) puts them in order. Writing a new one takes a few minutes, see [docs/writing-labs.md](docs/writing-labs.md).
+
+## Mock exams
+
+`ckad-mock-1` and `ckad-mock-2` each have 16 weighted tasks across all five domains, a 120 minute timer and a 66% pass mark, like the real exam. You start on a base node and connect to each task's host with `ssh`, where a separate simulated cluster waits for you. At the end every task is scored automatically, with partial credit per check, and you get the breakdown and a reference solution for each task.
+
+In the browser click **Mock exam**; in the terminal run `npm start -- exam ckad-mock-1` (or `ckad-mock-2`). The questions are original practice material mapped to the public curriculum, not exam questions.
 
 ## CKAD coverage
 
@@ -147,7 +192,7 @@ Not simulated yet: `--watch`, an editor inside the terminal for `kubectl edit` (
 packages/core   simulated cluster engine, kubectl emulation, shell, lab runner (no Node APIs, runs in the browser too)
 packages/cli    terminal front end (readline, real files in ./podsim-work)
 packages/web    browser front end (xterm.js, in-memory files)
-labs/           lab definitions in YAML
+labs/           lab definitions in YAML, and curriculum.yaml with the training path and tracks
 exams/          mock exam definitions in YAML
 ```
 

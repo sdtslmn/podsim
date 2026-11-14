@@ -1,0 +1,64 @@
+id: i11-fix-liveness
+title: Stop a restart loop caused by a probe
+level: intermediate
+minutes: 10
+tracks: [ckad]
+topic: Health and resources
+intro: |
+  The Pod `frontend` keeps restarting even though nginx itself is fine.
+  Find out what kills it and fix the cause. The Pod's manifest is in
+  `frontend.yaml`.
+files:
+  frontend.yaml: |
+    apiVersion: v1
+    kind: Pod
+    metadata:
+      name: frontend
+      labels:
+        app: frontend
+    spec:
+      containers:
+      - name: nginx
+        image: nginx:1.29
+        ports:
+        - containerPort: 80
+        livenessProbe:
+          httpGet:
+            path: /healthz
+            port: 80
+          periodSeconds: 5
+          failureThreshold: 2
+setup:
+  - kubectl apply -f frontend.yaml
+settle: 40
+tasks:
+  - Find out why the container of `frontend` keeps restarting.
+  - Fix the liveness probe so it checks the path `/`, which nginx serves. Keep everything else, and keep the Pod name.
+checks:
+  - name: The liveness probe checks /
+    kind: Pod
+    resource: frontend
+    path: .spec.containers[0].livenessProbe.httpGet.path
+    equals: /
+  - name: The container has not restarted since the fix
+    kind: Pod
+    resource: frontend
+    path: .status.containerStatuses[0].restartCount
+    equals: 0
+  - name: Pod frontend is ready
+    kind: Pod
+    resource: frontend
+    path: .status.containerStatuses[0].ready
+    equals: true
+hints:
+  - "kubectl describe pod frontend: look for Unhealthy events from the kubelet."
+  - "The probe gets HTTP 404. Change the path in frontend.yaml, then kubectl replace --force -f frontend.yaml"
+solution:
+  - sed -i 's|/healthz|/|' frontend.yaml
+  - kubectl replace --force -f frontend.yaml
+  - sleep 20
+learned: |
+  "Liveness probe failed: HTTP probe failed with statuscode: 404" followed by
+  "Container nginx failed liveness probe, will be restarted" is the signature
+  of a probe that checks the wrong thing. kubectl logs --previous shows the
+  output of the container before the last restart.

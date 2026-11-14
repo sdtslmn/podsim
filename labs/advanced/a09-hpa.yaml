@@ -1,0 +1,73 @@
+id: a09-hpa
+title: Scale on CPU with a HorizontalPodAutoscaler
+level: advanced
+minutes: 12
+tracks: [ckad, cka]
+topic: Observability and debugging
+intro: |
+  A HorizontalPodAutoscaler (HPA) changes a Deployment's replica count based
+  on metrics. For CPU it compares the Pods' usage with their CPU request:
+  with a target of 50%, Pods requesting 200m are scaled out when they use
+  more than 100m on average.
+
+  The HPA needs metrics-server (installed here) and CPU requests on the
+  containers. The Deployment `api` is busy and has no requests yet.
+setup:
+  - |
+    cat <<EOF | kubectl apply -f -
+    apiVersion: apps/v1
+    kind: Deployment
+    metadata:
+      name: api
+    spec:
+      replicas: 1
+      selector:
+        matchLabels:
+          app: api
+      template:
+        metadata:
+          labels:
+            app: api
+        spec:
+          containers:
+          - name: api
+            image: polinux/stress
+            command: ["stress", "--cpu", "1"]
+    EOF
+tasks:
+  - Give the container `api` a CPU request of 200m and a CPU limit of 500m.
+  - Create a HorizontalPodAutoscaler for the Deployment `api` that keeps average CPU utilization at 50%, with 1 to 5 replicas.
+  - Watch it scale out (`kubectl get hpa api` every few seconds) until it reaches 5 replicas.
+checks:
+  - name: The container requests 200m CPU
+    kind: Deployment
+    resource: api
+    path: .spec.template.spec.containers[0].resources.requests.cpu
+    equals: 200m
+  - name: The HPA targets 50% CPU
+    kind: HorizontalPodAutoscaler
+    resource: api
+    path: .spec.metrics[0].resource.target.averageUtilization
+    equals: 50
+  - name: The HPA allows up to 5 replicas
+    kind: HorizontalPodAutoscaler
+    resource: api
+    path: .spec.maxReplicas
+    equals: 5
+  - name: The Deployment was scaled to 5
+    kind: Deployment
+    resource: api
+    path: .spec.replicas
+    equals: 5
+hints:
+  - "kubectl set resources deployment api --requests=cpu=200m --limits=cpu=500m"
+  - "kubectl autoscale deployment api --min=1 --max=5 --cpu-percent=50"
+  - "kubectl describe hpa api shows the current utilization and every rescale event."
+solution:
+  - kubectl set resources deployment api --requests=cpu=200m --limits=cpu=500m
+  - kubectl autoscale deployment api --min=1 --max=5 --cpu-percent=50
+  - sleep 120
+learned: |
+  Without requests the HPA reports "missing request for cpu" and does
+  nothing. Scaling down waits for a 5 minute stabilization window, so
+  replicas do not flap when load dips for a moment.

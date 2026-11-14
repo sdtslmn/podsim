@@ -9,6 +9,7 @@ import { deepClone, isoTime, parseTime, stableStringify } from "../util.js";
 import { isPodReady, ownedBy, templateHash } from "./deployment.js";
 import { matchNodeSelectorTerm, tolerates, type NodeSelectorTerm } from "./scheduler.js";
 import { parseSchedule, lastRunBetween } from "../cron.js";
+import { tryAdmitPod } from "../admission.js";
 
 const isActive = (p: KObject) => p.status?.phase !== "Succeeded" && p.status?.phase !== "Failed" && !p.metadata.deletionTimestamp;
 const isRunningReady = (p: KObject) => p.status?.phase === "Running" && isPodReady(p);
@@ -166,6 +167,7 @@ export function reconcileJobs(cluster: Cluster, t: number): void {
           for (const c of pod.spec.containers) c.env = [...(c.env ?? []), { name: "JOB_COMPLETION_INDEX", valueFrom: { fieldRef: { fieldPath: "metadata.annotations['batch.kubernetes.io/job-completion-index']" } } }];
           pod.spec.hostname = name.replace(/-[a-z0-9]{5}$/, "");
         }
+        if (!tryAdmitPod(cluster, job, pod, t, "job-controller")) break;
         cluster.put(pod);
         cluster.recordEvent(job, "Normal", "SuccessfulCreate", `Created pod: ${name}`, { component: "job-controller" }, t);
       }
@@ -391,6 +393,7 @@ export function reconcileDaemonSets(cluster: Cluster, t: number): void {
         requiredDuringSchedulingIgnoredDuringExecution: { nodeSelectorTerms: [{ matchFields: [{ key: "metadata.name", operator: "In", values: [node.metadata.name] }] }] },
       };
       pod.spec.affinity = userAffinity;
+      if (!tryAdmitPod(cluster, ds, pod, t, "daemonset-controller")) break;
       cluster.put(pod);
       cluster.recordEvent(ds, "Normal", "SuccessfulCreate", `Created pod: ${name}`, src, t);
     }
@@ -475,6 +478,7 @@ export function reconcileStatefulSets(cluster: Cluster, t: number): void {
         const vols = (pod.spec.volumes ?? []).filter((v: { name: string }) => v.name !== vct.metadata?.name);
         pod.spec.volumes = [...vols, { name: vct.metadata?.name, persistentVolumeClaim: { claimName } }];
       }
+      if (!tryAdmitPod(cluster, sts, pod, t, "statefulset-controller")) break;
       cluster.put(pod);
       cluster.recordEvent(sts, "Normal", "SuccessfulCreate", `create Pod ${name} in StatefulSet ${sts.metadata.name} successful`, src, t);
       if (!parallel) blocked = true;

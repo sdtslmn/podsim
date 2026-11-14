@@ -674,6 +674,25 @@ function describeSecret(cluster: Cluster, s: KObject): string {
   return w.render();
 }
 
+function quotaBlock(w: Writer, q: KObject, indent: number): void {
+  const hard = (q.status?.hard ?? q.spec?.hard ?? {}) as Record<string, string>;
+  const used = (q.status?.used ?? {}) as Record<string, string>;
+  w.table(indent, ["Resource", "Used", "Hard"], Object.keys(hard).sort().map((k) => [k, used[k] ?? "0", hard[k]]));
+}
+
+function limitRangeRows(lr: KObject): string[][] {
+  const rows: string[][] = [];
+  for (const item of (lr.spec?.limits ?? []) as Record<string, any>[]) {
+    const resources = new Set<string>(["max", "min", "default", "defaultRequest", "maxLimitRequestRatio"].flatMap((k) => Object.keys(item[k] ?? {})));
+    for (const r of [...resources].sort()) {
+      rows.push([item.type, r, item.min?.[r] ?? "-", item.max?.[r] ?? "-", item.defaultRequest?.[r] ?? "-", item.default?.[r] ?? "-", item.maxLimitRequestRatio?.[r] !== undefined ? String(item.maxLimitRequestRatio[r]) : "-"]);
+    }
+  }
+  return rows;
+}
+
+const LR_HEADERS = ["Type", "Resource", "Min", "Max", "Default Request", "Default Limit", "Max Limit/Request Ratio"];
+
 function describeNamespace(cluster: Cluster, ns: KObject): string {
   const w = new Writer();
   w.kv(0, "Name", ns.metadata.name);
@@ -681,9 +700,102 @@ function describeNamespace(cluster: Cluster, ns: KObject): string {
   w.kv(0, "Annotations", annotationsBlock(ns.metadata.annotations));
   w.kv(0, "Status", ns.status?.phase ?? "Active");
   w.head(0, "");
-  w.head(0, "No resource quota.");
+  const quotas = cluster.list("ResourceQuota", ns.metadata.name);
+  if (!quotas.length) w.head(0, "No resource quota.");
+  for (const q of quotas) {
+    w.head(0, "Resource Quotas");
+    w.kv(2, "Name", q.metadata.name);
+    quotaBlock(w, q, 2);
+  }
   w.head(0, "");
-  w.head(0, "No LimitRange resource.");
+  const lrs = cluster.list("LimitRange", ns.metadata.name);
+  if (!lrs.length) w.head(0, "No LimitRange resource.");
+  for (const lr of lrs) {
+    w.head(0, "Resource Limits");
+    w.table(1, LR_HEADERS, limitRangeRows(lr));
+  }
+  return w.render();
+}
+
+function describeQuota(cluster: Cluster, q: KObject): string {
+  const w = new Writer();
+  w.kv(0, "Name", q.metadata.name);
+  w.kv(0, "Namespace", q.metadata.namespace);
+  if (q.spec?.scopes) w.kv(0, "Scopes", (q.spec.scopes as string[]).join(", "));
+  quotaBlock(w, q, 0);
+  return w.render();
+}
+
+function describeLimitRange(cluster: Cluster, lr: KObject): string {
+  const w = new Writer();
+  w.kv(0, "Name", lr.metadata.name);
+  w.kv(0, "Namespace", lr.metadata.namespace);
+  w.table(0, LR_HEADERS, limitRangeRows(lr));
+  return w.render();
+}
+
+function describeServiceAccount(cluster: Cluster, sa: KObject): string {
+  const w = new Writer();
+  w.kv(0, "Name", sa.metadata.name);
+  w.kv(0, "Namespace", sa.metadata.namespace);
+  w.kv(0, "Labels", labelsBlock(sa.metadata.labels));
+  w.kv(0, "Annotations", annotationsBlock(sa.metadata.annotations));
+  const pulls = ((sa.imagePullSecrets as { name: string }[]) ?? []).map((x) => x.name);
+  w.kv(0, "Image pull secrets", pulls.length ? pulls.join(", ") : "<none>");
+  const secrets = ((sa.secrets as { name: string }[]) ?? []).map((x) => x.name);
+  w.kv(0, "Mountable secrets", secrets.length ? secrets.join(", ") : "<none>");
+  w.kv(0, "Tokens", "<none>");
+  eventsSection(cluster, w, sa);
+  return w.render();
+}
+
+const MODE_SHORT: Record<string, string> = { ReadWriteOnce: "RWO", ReadOnlyMany: "ROX", ReadWriteMany: "RWX", ReadWriteOncePod: "RWOP" };
+
+function describePVC(cluster: Cluster, c: KObject): string {
+  const w = new Writer();
+  const users = cluster.list("Pod", c.metadata.namespace).filter((p) => (p.spec?.volumes ?? []).some((v: { persistentVolumeClaim?: { claimName: string } }) => v.persistentVolumeClaim?.claimName === c.metadata.name)).map((p) => p.metadata.name);
+  w.kv(0, "Name", c.metadata.name);
+  w.kv(0, "Namespace", c.metadata.namespace);
+  w.kv(0, "StorageClass", c.spec?.storageClassName ?? "");
+  w.kv(0, "Status", c.status?.phase ?? "Pending");
+  w.kv(0, "Volume", c.spec?.volumeName ?? "");
+  w.kv(0, "Labels", labelsBlock(c.metadata.labels));
+  w.kv(0, "Annotations", annotationsBlock(c.metadata.annotations));
+  w.kv(0, "Finalizers", "[kubernetes.io/pvc-protection]");
+  w.kv(0, "Capacity", c.status?.capacity?.storage ?? "");
+  w.kv(0, "Access Modes", ((c.status?.accessModes ?? []) as string[]).map((m) => MODE_SHORT[m] ?? m).join(","));
+  w.kv(0, "VolumeMode", c.spec?.volumeMode ?? "Filesystem");
+  w.kv(0, "Used By", users.length ? users.join("\n") : "<none>");
+  eventsSection(cluster, w, c);
+  return w.render();
+}
+
+function describePV(cluster: Cluster, v: KObject): string {
+  const w = new Writer();
+  w.kv(0, "Name", v.metadata.name);
+  w.kv(0, "Labels", labelsBlock(v.metadata.labels));
+  w.kv(0, "Annotations", annotationsBlock(v.metadata.annotations));
+  w.kv(0, "Finalizers", "[kubernetes.io/pv-protection]");
+  w.kv(0, "StorageClass", v.spec?.storageClassName ?? "");
+  w.kv(0, "Status", v.status?.phase ?? "Available");
+  w.kv(0, "Claim", v.spec?.claimRef ? `${v.spec.claimRef.namespace}/${v.spec.claimRef.name}` : "");
+  w.kv(0, "Reclaim Policy", v.spec?.persistentVolumeReclaimPolicy ?? "Retain");
+  w.kv(0, "Access Modes", ((v.spec?.accessModes ?? []) as string[]).map((m) => MODE_SHORT[m] ?? m).join(","));
+  w.kv(0, "VolumeMode", v.spec?.volumeMode ?? "Filesystem");
+  w.kv(0, "Capacity", v.spec?.capacity?.storage ?? "");
+  w.kv(0, "Node Affinity", "<none>");
+  w.kv(0, "Message", "");
+  w.head(0, "Source:");
+  if (v.spec?.hostPath) {
+    w.kv(4, "Type", "HostPath (bare host directory volume)");
+    w.kv(4, "Path", v.spec.hostPath.path);
+    w.kv(4, "HostPathType", v.spec.hostPath.type ?? "");
+  } else if (v.spec?.nfs) {
+    w.kv(4, "Type", "NFS (an NFS mount that lasts the lifetime of a pod)");
+    w.kv(4, "Server", v.spec.nfs.server);
+    w.kv(4, "Path", v.spec.nfs.path);
+  } else w.kv(4, "Type", "<unknown>");
+  eventsSection(cluster, w, v);
   return w.render();
 }
 
@@ -759,6 +871,16 @@ export function describe(cluster: Cluster, obj: KObject): string {
     case "RoleBinding":
     case "ClusterRoleBinding":
       return describeBinding(cluster, obj);
+    case "ResourceQuota":
+      return describeQuota(cluster, obj);
+    case "LimitRange":
+      return describeLimitRange(cluster, obj);
+    case "ServiceAccount":
+      return describeServiceAccount(cluster, obj);
+    case "PersistentVolumeClaim":
+      return describePVC(cluster, obj);
+    case "PersistentVolume":
+      return describePV(cluster, obj);
     case "Job":
       return describeJob(cluster, obj);
     case "CronJob":

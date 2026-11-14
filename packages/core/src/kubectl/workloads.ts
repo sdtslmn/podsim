@@ -83,6 +83,24 @@ export async function cmdRun(ctx: Ctx, f: Flags): Promise<number> {
   };
   const anns = f.all("annotations");
   if (anns.length) pod.metadata.annotations = parseKV(anns, "annotations");
+  const overrides = f.str("overrides");
+  if (overrides) {
+    let patch: unknown;
+    try {
+      patch = JSON.parse(overrides);
+    } catch (e) {
+      throw new KubeError(`error: Invalid JSON Patch: ${(e as Error).message}`);
+    }
+    const merge = (target: Record<string, unknown>, p: Record<string, unknown>): Record<string, unknown> => {
+      for (const [k, v] of Object.entries(p)) {
+        if (v === null) delete target[k];
+        else if (typeof v === "object" && !Array.isArray(v) && typeof target[k] === "object" && target[k] && !Array.isArray(target[k])) target[k] = merge({ ...(target[k] as Record<string, unknown>) }, v as Record<string, unknown>);
+        else target[k] = v;
+      }
+      return target;
+    };
+    Object.assign(pod, merge(pod as unknown as Record<string, unknown>, patch as Record<string, unknown>));
+  }
   if (f.bool("privileged")) (container as { securityContext?: unknown }).securityContext = { privileged: true };
 
   if (dryRun(f)) {
@@ -92,6 +110,7 @@ export async function cmdRun(ctx: Ctx, f: Flags): Promise<number> {
   cluster.advance();
   pod.metadata.namespace = ns;
   const created = cluster.create(pod);
+  for (const w of cluster.takeWarnings()) err(ctx, `Warning: ${w}`);
   cluster.advance();
 
   if (!interactive && !f.bool("rm")) {
@@ -282,6 +301,54 @@ export async function cmdCreate(ctx: Ctx, f: Flags): Promise<number> {
       obj = { apiVersion: "v1", kind: "ServiceAccount", metadata: { name, ...nsMeta } };
       break;
     }
+    case "quota":
+    case "resourcequota": {
+      const name = rest[0];
+      if (!name) throw new KubeError("error: exactly one NAME is required, got 0");
+      const hard: Record<string, string> = {};
+      for (const part of (f.str("hard") ?? "").split(",").filter(Boolean)) {
+        const [k, v] = part.split("=");
+        if (!k || v === undefined) throw new KubeError(`error: invalid argument "${part}" for "--hard" flag`);
+        hard[k] = v;
+      }
+      const scopes = (f.str("scopes") ?? "").split(",").filter(Boolean);
+      obj = { apiVersion: "v1", kind: "ResourceQuota", metadata: { name, ...nsMeta }, spec: { hard, ...(scopes.length ? { scopes } : {}) }, status: {} };
+      break;
+    }
+    case "token": {
+      const sa = rest[0];
+      if (!sa) throw new KubeError("error: exactly one NAME is required, got 0");
+      if (!ctx.cluster.get("ServiceAccount", sa, ns)) throw new KubeError(`error: failed to create token: serviceaccounts "${sa}" not found`);
+      const dur = f.str("duration") ?? "1h";
+      const header = btoa(JSON.stringify({ alg: "RS256", kid: "podsim" })).replace(/=+$/, "");
+      const now = Math.floor(ctx.cluster.now() / 1000);
+      const m = dur.match(/^(\d+)(s|m|h)$/);
+      const secs = m ? parseInt(m[1], 10) * ({ s: 1, m: 60, h: 3600 }[m[2] as "s" | "m" | "h"]) : 3600;
+      const payload = btoa(JSON.stringify({ aud: [f.str("audience") ?? "https://kubernetes.default.svc.cluster.local"], exp: now + secs, iat: now, iss: "https://kubernetes.default.svc.cluster.local", sub: `system:serviceaccount:${ns}:${sa}`, "kubernetes.io": { namespace: ns, serviceaccount: { name: sa } } })).replace(/=+$/, "");
+      out(ctx, `${header}.${payload}.c2ltdWxhdGVkLXNpZ25hdHVyZQ`);
+      return 0;
+    }
+    case "priorityclass":
+    case "pc": {
+      const name = rest[0];
+      if (!name) throw new KubeError("error: exactly one NAME is required, got 0");
+      obj = { apiVersion: "scheduling.k8s.io/v1", kind: "PriorityClass", metadata: { name }, value: f.int("value") ?? 0, globalDefault: f.bool("global-default"), description: f.str("description") ?? "", preemptionPolicy: f.str("preemption-policy") ?? "PreemptLowerPriority" };
+      break;
+    }
+    case "poddisruptionbudget":
+    case "pdb": {
+      const name = rest[0];
+      if (!name) throw new KubeError("error: exactly one NAME is required, got 0");
+      const sel = f.str("selector") ?? "";
+      const matchLabels = Object.fromEntries(sel.split(",").filter(Boolean).map((p) => p.split("=")));
+      const spec: Record<string, unknown> = { selector: { matchLabels } };
+      const minA = f.str("min-available");
+      const maxU = f.str("max-unavailable");
+      if (minA) spec.minAvailable = /^\d+$/.test(minA) ? parseInt(minA, 10) : minA;
+      if (maxU) spec.maxUnavailable = /^\d+$/.test(maxU) ? parseInt(maxU, 10) : maxU;
+      obj = { apiVersion: "policy/v1", kind: "PodDisruptionBudget", metadata: { name, ...nsMeta }, spec, status: {} };
+      break;
+    }
     case "role":
     case "clusterrole": {
       const name = rest[0];
@@ -401,6 +468,7 @@ export async function cmdCreate(ctx: Ctx, f: Flags): Promise<number> {
   ctx.cluster.advance();
   if (info.namespaced) obj.metadata.namespace = ns;
   const created = ctx.cluster.create(obj);
+  for (const w of ctx.cluster.takeWarnings()) err(ctx, `Warning: ${w}`);
   ctx.cluster.advance();
   if (output) {
     const text = renderStructured([created], output, true);

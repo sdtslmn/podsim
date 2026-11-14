@@ -17,6 +17,7 @@ import {
 import { defaultPullPolicy } from "./images.js";
 import { runControllers, type PodSim } from "./controllers/index.js";
 import { parseSchedule } from "./cron.js";
+import { admitPod, admitObject, templateWarnings } from "./admission.js";
 
 export interface ClusterOptions {
   /** Wall clock in ms. Defaults to Date.now. Tests pass a fake clock. */
@@ -60,6 +61,14 @@ export class Cluster {
   readonly controllerState = new Map<string, number>();
   /** Free-form memory for controllers (e.g. which finished jobs a CronJob already reported). */
   readonly scratch = new Map<string, unknown>();
+  /** Admission warnings from the last create, for kubectl to print. */
+  private warnings: string[] = [];
+
+  takeWarnings(): string[] {
+    const w = this.warnings;
+    this.warnings = [];
+    return w;
+  }
 
   constructor(opts: ClusterOptions = {}) {
     this.clockFn = opts.clock ?? (() => Date.now());
@@ -200,6 +209,15 @@ export class Cluster {
 
     this.validate(obj);
     this.applyDefaults(obj);
+    if (!opts.dryRun && !opts.at) {
+      if (info.kind === "Pod") {
+        this.warnings.push(...admitPod(this, obj));
+        obj.status.qosClass = qosClass(obj.spec);
+      } else {
+        admitObject(this, obj);
+        this.warnings.push(...templateWarnings(this, obj));
+      }
+    }
 
     const now = opts.at ?? this.now();
     obj.metadata.uid = this.random.uid();
@@ -297,6 +315,19 @@ export class Cluster {
       obj.status = existing.status;
     }
     if (info.kind === "Node" || info.kind === "Namespace") obj.status = obj.status ?? existing.status;
+    if ((info.kind === "ConfigMap" || info.kind === "Secret") && existing.immutable === true) {
+      if (stableStringify({ d: obj.data, b: obj.binaryData }) !== stableStringify({ d: existing.data, b: existing.binaryData })) {
+        throw invalid(info.kind, obj.metadata.name, "data: Forbidden: field is immutable when `immutable` is set");
+      }
+      if (obj.immutable !== true) throw invalid(info.kind, obj.metadata.name, "immutable: Forbidden: field is immutable when `immutable` is set");
+    }
+    if (info.kind === "PersistentVolumeClaim" && existing.status?.phase === "Bound") {
+      const keep = (spec: Record<string, any>) => stableStringify({ ...spec, resources: undefined, volumeName: undefined, storageClassName: undefined, volumeMode: undefined });
+      if (keep(obj.spec ?? {}) !== keep(existing.spec ?? {})) throw invalid("PersistentVolumeClaim", obj.metadata.name, "spec: Forbidden: spec is immutable after creation except resources.requests and volumeAttributesClassName for bound claims");
+      obj.spec.volumeName = existing.spec.volumeName;
+      obj.spec.storageClassName = existing.spec.storageClassName;
+      obj.status = existing.status;
+    }
     this.put(obj);
     return obj;
   }
@@ -451,6 +482,16 @@ export class Cluster {
         obj.metadata.labels = { "kubernetes.io/metadata.name": obj.metadata.name, ...(obj.metadata.labels ?? {}) };
         obj.spec = obj.spec ?? { finalizers: ["kubernetes"] };
         obj.status = obj.status ?? { phase: "Active" };
+        break;
+      case "PersistentVolume":
+        obj.spec = obj.spec ?? {};
+        obj.spec.persistentVolumeReclaimPolicy = obj.spec.persistentVolumeReclaimPolicy ?? "Retain";
+        obj.spec.volumeMode = obj.spec.volumeMode ?? "Filesystem";
+        obj.status = obj.status ?? { phase: "Available" };
+        break;
+      case "StorageClass":
+        obj.reclaimPolicy = obj.reclaimPolicy ?? "Delete";
+        obj.volumeBindingMode = obj.volumeBindingMode ?? "Immediate";
         break;
       case "PersistentVolumeClaim":
         obj.spec = obj.spec ?? {};
@@ -817,6 +858,15 @@ export class Cluster {
       metadata: { name: "cluster-admin", labels: { "kubernetes.io/bootstrapping": "rbac-defaults" } },
       roleRef: { apiGroup: "rbac.authorization.k8s.io", kind: "ClusterRole", name: "cluster-admin" },
       subjects: [{ apiGroup: "rbac.authorization.k8s.io", kind: "Group", name: "system:masters" }],
+    });
+
+    mk({
+      apiVersion: "storage.k8s.io/v1",
+      kind: "StorageClass",
+      metadata: { name: "standard", annotations: { "storageclass.kubernetes.io/is-default-class": "true" } },
+      provisioner: "rancher.io/local-path",
+      reclaimPolicy: "Delete",
+      volumeBindingMode: "Immediate",
     });
 
     // Let everything settle as if the cluster had been up for a while.

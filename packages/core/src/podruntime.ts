@@ -9,6 +9,7 @@ import { parseImage } from "./images.js";
 import { matchMap } from "./util.js";
 import { DIR, DELETED, normalizePath, Proc, execNow, formatDate, nginxPorts, setPortChecker, type Fs, type Host, type NetResult, type Server } from "./runtime.js";
 import { quoteArgv } from "./shparse.js";
+import { apiGet, identityFromToken } from "./apiserver.js";
 import type { ContainerSim, PodSim } from "./controllers/index.js";
 
 export type Store = Map<string, string>;
@@ -667,7 +668,10 @@ export function containerFs(cluster: Cluster, pod: KObject, c: ContainerSpec, si
       continue;
     }
     let store: Store;
-    if (v.persistentVolumeClaim) store = persistentStore(cluster, `pvc/${ns}/${v.persistentVolumeClaim.claimName}`);
+    if (v.persistentVolumeClaim) {
+      const claim = cluster.get("PersistentVolumeClaim", v.persistentVolumeClaim.claimName, ns);
+      store = persistentStore(cluster, claim?.spec?.volumeName ? `pv/${claim.spec.volumeName}` : `pvc/${ns}/${v.persistentVolumeClaim.claimName}`);
+    }
     else if (v.hostPath) {
       const node = pod.spec?.nodeName ?? "node";
       const all = persistentStore(cluster, `hostpath/${node}`);
@@ -738,9 +742,10 @@ export function hostFor(cluster: Cluster, pod: KObject, c: ContainerSpec, cs: Co
     HOSTNAME: pod.spec?.hostname ?? pod.metadata.name,
     HOME: id.uid === 0 ? "/root" : "/",
   };
+  const fsRef = containerFs(cluster, pod, c, sim, cs.overlay, id);
   return {
     now: () => cluster.now(),
-    fs: containerFs(cluster, pod, c, sim, cs.overlay, id),
+    fs: fsRef,
     tools: toolsFor(c.image),
     env,
     hostname: pod.spec?.hostname ?? pod.metadata.name,
@@ -750,7 +755,7 @@ export function hostFor(cluster: Cluster, pod: KObject, c: ContainerSpec, cs: Co
     groups: id.groups,
     caps: id.caps,
     image: parseImage(c.image).repository,
-    net: (cmd, args, stdin, at) => netCommand(cluster, pod, cmd, args, stdin, at),
+    net: (cmd, args, stdin, at) => netCommand(cluster, pod, cmd, args, stdin, at, fsRef),
   };
 }
 
@@ -1026,8 +1031,29 @@ function wget(cluster: Cluster, from: KObject, ns: string, args: string[]): NetR
   return { stdout: "", stderr: quiet ? "" : `${connecting}saving to '${name}'\n${name.padEnd(20)} 100% |********************************|   ${res.body.length}  0:00:00 ETA\n'${name}' saved\n`, code: 0, saveAs: { name, body: res.body } } as NetResult;
 }
 
-function curl(cluster: Cluster, from: KObject, ns: string, args: string[]): NetResult {
+function isApiServer(cluster: Cluster, ns: string, host: string, port: number): boolean {
+  const t = resolveHost(cluster, ns, host);
+  if (t?.service && t.service.metadata.name === "kubernetes" && t.service.metadata.namespace === "default" && port === 443) return true;
+  return port === 6443 && (host === "192.168.56.10" || host === "controlplane");
+}
+
+function curlApi(cluster: Cluster, url: string, headers: string[], insecure: boolean, cacert: string | undefined, fs: Fs | undefined, wo: (code: string) => string, head: boolean, include: boolean): NetResult {
+  if (!insecure && !(cacert && fs?.read(cacert)?.includes("BEGIN CERTIFICATE"))) {
+    return { stdout: wo("000"), stderr: "curl: (60) SSL certificate problem: unable to get local issuer certificate\nMore details here: https://curl.se/docs/sslcerts.html\n\ncurl failed to verify the legitimacy of the server and therefore could not\nestablish a secure connection to it. To learn more about this situation and\nhow to fix it, please visit the webpage mentioned above.\n", code: 60 };
+  }
+  const auth = headers.find((h) => /^authorization:/i.test(h));
+  const token = auth?.match(/bearer\s+(\S+)/i)?.[1];
+  const path = url.replace(/^https:\/\/[^/]+/, "") || "/";
+  const res = apiGet(cluster, identityFromToken(token), path);
+  const hdr = `HTTP/2 ${res.status} \ncontent-type: application/json\ncontent-length: ${res.body.length}\n\n`;
+  return { stdout: (head ? hdr : include ? hdr + res.body : res.body) + wo(String(res.status)), stderr: "", code: 0 };
+}
+
+function curl(cluster: Cluster, from: KObject, ns: string, args: string[], fs?: Fs): NetResult {
   let head = false;
+  const headers: string[] = [];
+  let insecure = false;
+  let cacert: string | undefined;
   let include = false;
   let writeOut: string | undefined;
   let outFile: string | undefined;
@@ -1041,18 +1067,24 @@ function curl(cluster: Cluster, from: KObject, ns: string, args: string[]): NetR
     else if (a === "-w" || a === "--write-out") writeOut = args[++i];
     else if (a === "-o" || a === "--output") outFile = args[++i];
     else if (a === "-f" || a === "--fail") failOnError = true;
-    else if (["-m", "--max-time", "--connect-timeout", "-H", "--header", "-X", "-d", "--data", "-A", "--user-agent", "-u", "--retry"].includes(a)) i++;
+    else if (a === "-H" || a === "--header") headers.push(args[++i] ?? "");
+    else if (a === "-k" || a === "--insecure") insecure = true;
+    else if (a === "--cacert") cacert = args[++i];
+    else if (["-m", "--max-time", "--connect-timeout", "-X", "-d", "--data", "-A", "--user-agent", "-u", "--retry"].includes(a)) i++;
     else if (a.startsWith("-") && !a.startsWith("--")) {
       if (a.includes("s")) silent = true;
       if (a.includes("I")) head = true;
       if (a.includes("f")) failOnError = true;
       if (a.includes("i")) include = true;
+      if (a.includes("k")) insecure = true;
     } else if (!a.startsWith("-")) url = a;
   }
   void silent;
   if (!url) return { stdout: "", stderr: "curl: try 'curl --help' or 'curl --manual' for more information\n", code: 2 };
-  const r = httpRequest(cluster, from, ns, url, "curl/8.17.0");
   const wo = (code: string) => (writeOut ? writeOut.replace("%{http_code}", code).replace(/\\n/g, "\n") : "");
+  const um = url.match(/^https:\/\/([^/:]+)(?::(\d+))?/);
+  if (um && isApiServer(cluster, ns, um[1], um[2] ? parseInt(um[2], 10) : 443)) return curlApi(cluster, url, headers, insecure, cacert, fs, wo, head, include);
+  const r = httpRequest(cluster, from, ns, url, "curl/8.17.0");
   if (r.error) {
     const msg =
       r.error === "unresolved"
@@ -1066,11 +1098,11 @@ function curl(cluster: Cluster, from: KObject, ns: string, args: string[]): NetR
   }
   const res = r.res!;
   if (failOnError && res.status >= 400) return { stdout: wo(String(res.status)), stderr: `curl: (22) The requested URL returned error: ${res.status}\n`, code: 22 };
-  const headers = `HTTP/1.1 ${res.status} ${statusText(res.status)}\nServer: ${res.body.includes("nginx") || res.status >= 400 ? "nginx/1.29.3" : "podsim"}\nContent-Type: text/html\nContent-Length: ${res.body.length}\n\n`;
+  const respHeaders = `HTTP/1.1 ${res.status} ${statusText(res.status)}\nServer: ${res.body.includes("nginx") || res.status >= 400 ? "nginx/1.29.3" : "podsim"}\nContent-Type: text/html\nContent-Length: ${res.body.length}\n\n`;
   let out = "";
-  if (head) out = headers;
+  if (head) out = respHeaders;
   else {
-    if (include) out += headers;
+    if (include) out += respHeaders;
     if (!outFile) out += res.body;
   }
   return { stdout: out + wo(String(res.status)), stderr: "", code: 0 };
@@ -1139,14 +1171,14 @@ function ping(cluster: Cluster, ns: string, args: string[]): NetResult {
 }
 
 /** Network tools called from inside a container. */
-export function netCommand(cluster: Cluster, pod: KObject, cmd: string, args: string[], stdin: string, at: number): NetResult {
+export function netCommand(cluster: Cluster, pod: KObject, cmd: string, args: string[], stdin: string, at: number, fs?: Fs): NetResult {
   void at;
   const ns = pod.metadata.namespace ?? "default";
   switch (cmd) {
     case "wget":
       return wget(cluster, pod, ns, args);
     case "curl":
-      return curl(cluster, pod, ns, args);
+      return curl(cluster, pod, ns, args, fs);
     case "nslookup":
     case "host":
     case "dig":

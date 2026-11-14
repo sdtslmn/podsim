@@ -4,7 +4,9 @@ import type { Cluster } from "../cluster.js";
 import type { FileSystem } from "../fs.js";
 import { KubeError } from "../types.js";
 import { Flags, parseArgs } from "./flags.js";
-import type { Ctx, IO, KubectlState } from "./common.js";
+import { authorize, parseTargets, type Ctx, type IO, type KubectlState } from "./common.js";
+import { parseAs } from "./rbac.js";
+import { KINDS } from "../kinds.js";
 import { cmdGet, cmdDescribe, cmdApply, cmdDelete, cmdReplace, cmdLabel, cmdAnnotate, cmdPatch } from "./resources.js";
 import { cmdRun, cmdCreate, cmdExpose, cmdScale, cmdSet, cmdRollout } from "./workloads.js";
 import {
@@ -116,6 +118,11 @@ export class Kubectl {
       ctx.io.stdout(`(podsim) Help for "kubectl ${cmd}" is not included. See https://kubernetes.io/docs/reference/kubectl/generated/kubectl_${cmd}/\n`);
       return 0;
     }
+    const as = f.str("as");
+    if (as && cmd !== "auth") {
+      ctx.user = parseAs(as, f.all("as-group"));
+      checkCommand(ctx, cmd, f);
+    }
     switch (cmd) {
       case "get":
         return cmdGet(ctx, f);
@@ -193,6 +200,40 @@ export class Kubectl {
         ctx.io.stderr(`error: unknown command "${cmd}" for "kubectl"\n\nDid you mean this?\n\t${suggest(cmd)}\n\nRun 'kubectl --help' for usage.\n`);
         return 1;
     }
+  }
+}
+
+/** RBAC check for commands that name their resources on the command line. */
+function checkCommand(ctx: Ctx, cmd: string, f: Flags): void {
+  const ns = f.str("namespace") ?? ctx.state.namespace;
+  const allNs = f.bool("all-namespaces") || f.bool("A");
+  const targetsOf = (args: string[]) => {
+    try {
+      return parseTargets(args);
+    } catch {
+      return [];
+    }
+  };
+  const verbFor: Record<string, string> = { get: "get", describe: "get", delete: "delete", label: "patch", annotate: "patch", patch: "patch", edit: "patch", scale: "patch", set: "patch" };
+  if (cmd in verbFor) {
+    const args = cmd === "set" ? f.args.slice(1) : f.args;
+    for (const t of targetsOf(args)) {
+      if (t.names.length === 0) authorize(ctx, cmd === "get" || cmd === "describe" ? "list" : verbFor[cmd], t.info, allNs ? undefined : ns);
+      for (const n of t.names) authorize(ctx, verbFor[cmd], t.info, ns, n, cmd === "scale" ? "scale" : undefined);
+    }
+    return;
+  }
+  const pods = KINDS.find((k) => k.kind === "Pod")!;
+  if (cmd === "logs" && f.args[0]) authorize(ctx, "get", pods, ns, f.args[0].split("/").pop(), "log");
+  if (cmd === "exec" && f.args[0]) authorize(ctx, "create", pods, ns, f.args[0].split("/").pop(), "exec");
+  if (cmd === "run") authorize(ctx, "create", pods, ns);
+  if (cmd === "expose") authorize(ctx, "create", KINDS.find((k) => k.kind === "Service")!, ns);
+  if (cmd === "rollout" && f.args[1]) for (const t of targetsOf(f.args.slice(1))) authorize(ctx, f.args[0] === "status" || f.args[0] === "history" ? "get" : "patch", t.info, ns, t.names[0]);
+  if (cmd === "create" && f.args[0] && !f.all("filename").length) {
+    const sub = f.args[0];
+    const kind = ({ deploy: "deployments", deployment: "deployments", ns: "namespaces", namespace: "namespaces", cm: "configmaps", configmap: "configmaps", secret: "secrets", svc: "services", service: "services", sa: "serviceaccounts", serviceaccount: "serviceaccounts", job: "jobs", cronjob: "cronjobs", cj: "cronjobs", role: "roles", rolebinding: "rolebindings", clusterrole: "clusterroles", clusterrolebinding: "clusterrolebindings", quota: "resourcequotas", ingress: "ingresses" } as Record<string, string>)[sub];
+    if (kind) authorize(ctx, "create", KINDS.find((k) => k.plural === kind)!, ns);
+    if (sub === "token") authorize(ctx, "create", KINDS.find((k) => k.kind === "ServiceAccount")!, ns, f.args[1], "token");
   }
 }
 

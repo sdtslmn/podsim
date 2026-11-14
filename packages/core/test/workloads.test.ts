@@ -76,8 +76,8 @@ describe("DaemonSets and StatefulSets", () => {
     const s = sandbox();
     s.fs.writeFile("sts.yaml", "apiVersion: v1\nkind: Service\nmetadata:\n  name: nginx\nspec:\n  clusterIP: None\n  selector: {app: web}\n  ports:\n  - port: 80\n---\napiVersion: apps/v1\nkind: StatefulSet\nmetadata:\n  name: web\nspec:\n  serviceName: nginx\n  replicas: 3\n  selector:\n    matchLabels: {app: web}\n  template:\n    metadata:\n      labels: {app: web}\n    spec:\n      containers:\n      - name: nginx\n        image: nginx\n        volumeMounts:\n        - name: www\n          mountPath: /usr/share/nginx/html\n  volumeClaimTemplates:\n  - metadata:\n      name: www\n    spec:\n      accessModes: [ReadWriteOnce]\n      resources:\n        requests:\n          storage: 1Gi\n");
     await run(s, "kubectl apply -f sts.yaml");
-    s.tick(3000);
-    expect((await run(s, "kubectl get pods --no-headers")).trim().split("\n")).toHaveLength(1);
+    s.tick(1000);
+    expect(await run(s, "kubectl get pods -o name")).toBe("pod/web-0\n");
     expect(await run(s, "kubectl rollout status sts/web")).toMatch(/statefulset rolling update complete 3 pods/);
     expect(await run(s, "kubectl get pvc -o name")).toBe("persistentvolumeclaim/www-web-0\npersistentvolumeclaim/www-web-1\npersistentvolumeclaim/www-web-2\n");
     await run(s, "kubectl exec web-1 -- sh -c 'echo web-1 > /usr/share/nginx/html/index.html'");

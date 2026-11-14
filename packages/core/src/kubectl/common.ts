@@ -5,6 +5,7 @@ import type { FileSystem } from "../fs.js";
 import type { KObject } from "../types.js";
 import { KubeError } from "../types.js";
 import { KINDS, PLANNED_KINDS, resolveKind, type KindInfo } from "../kinds.js";
+import { canI, type Identity } from "./rbac.js";
 import { matchRequirements, parseSelector } from "../util.js";
 import { evalPath } from "./jsonpath.js";
 import type { Flags } from "./flags.js";
@@ -38,6 +39,8 @@ export interface KubectlState {
 }
 
 export interface Ctx {
+  /** Set by --as: commands are checked against RBAC for this identity. */
+  user?: Identity;
   cluster: Cluster;
   fs: FileSystem;
   state: KubectlState;
@@ -52,6 +55,17 @@ export function out(ctx: Ctx, text: string): void {
 
 export function err(ctx: Ctx, text: string): void {
   ctx.io.stderr(text.endsWith("\n") ? text : text + "\n");
+}
+
+/** Throw the API server's Forbidden error unless ctx.user may do this (no-op without --as). */
+export function authorize(ctx: Ctx, verb: string, info: KindInfo, ns: string | undefined, name?: string, sub?: string): void {
+  if (!ctx.user) return;
+  const res = info.plural + (sub ? `/${sub}` : "");
+  if (canI(ctx.cluster, ctx.user, verb, res, info.namespaced ? ns : undefined, name)) return;
+  const group = info.apiVersion.includes("/") ? info.apiVersion.split("/")[0] : "";
+  const subject = `${info.plural}${group ? "." + group : ""}${name ? ` "${name}"` : ""}`;
+  const where = info.namespaced ? `in the namespace "${ns}"` : "at the cluster scope";
+  throw new KubeError(`Error from server (Forbidden): ${subject} is forbidden: User "${ctx.user.user}" cannot ${verb} resource "${res}" in API group "${group}" ${where}`);
 }
 
 export function nsOf(ctx: Ctx, f: Flags): string {

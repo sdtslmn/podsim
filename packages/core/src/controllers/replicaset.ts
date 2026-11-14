@@ -5,6 +5,7 @@ import { defaultPodSpec } from "../cluster.js";
 import type { KObject } from "../types.js";
 import { deepClone, isoTime, matchLabelSelector, stableStringify } from "../util.js";
 import { isPodReady, ownedBy } from "./deployment.js";
+import { tryAdmitPod } from "../admission.js";
 
 function isActive(pod: KObject): boolean {
   return pod.status?.phase !== "Succeeded" && pod.status?.phase !== "Failed" && !pod.metadata.deletionTimestamp;
@@ -54,6 +55,7 @@ export function reconcileReplicaSets(cluster: Cluster, t: number): void {
           spec,
           status: { phase: "Pending", qosClass: "BestEffort" },
         };
+        if (!tryAdmitPod(cluster, rs, pod, t, "replicaset-controller")) break;
         cluster.put(pod);
         cluster.recordEvent(rs, "Normal", "SuccessfulCreate", `Created pod: ${name}`, { component: "replicaset-controller" }, t);
       }

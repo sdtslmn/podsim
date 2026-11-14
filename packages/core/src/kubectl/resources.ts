@@ -21,6 +21,7 @@ import {
   dryRun,
   kindOrThrow,
 } from "./common.js";
+import { authorize } from "./common.js";
 import { printTable, renderStructured, toYaml } from "./printers.js";
 import { describe } from "./describe.js";
 import { evalPath } from "./jsonpath.js";
@@ -208,6 +209,18 @@ function prepareNamespace(ctx: Ctx, f: Flags, obj: KObject, info: KindInfo): voi
   obj.metadata.namespace = obj.metadata.namespace ?? flagNs ?? ctx.state.namespace;
 }
 
+/** Server errors for objects from files name the file, like kubectl does. */
+function withSource<T>(fn: () => T, source: string, verb: "creating" | "applying"): T {
+  try {
+    return fn();
+  } catch (e) {
+    if (e instanceof KubeError && e.message.startsWith("Error from server (Forbidden): ") && !e.message.includes("error when")) {
+      throw new KubeError(e.message.replace("Error from server (Forbidden): ", `Error from server (Forbidden): error when ${verb} "${source}": `));
+    }
+    throw e;
+  }
+}
+
 export async function cmdApply(ctx: Ctx, f: Flags): Promise<number> {
   const { cluster } = ctx;
   if (f.has("kustomize") || f.args[0] === "-k") throw new KubeError("(podsim) kustomize (-k) is not simulated yet.");
@@ -226,11 +239,13 @@ export async function cmdApply(ctx: Ctx, f: Flags): Promise<number> {
       prepareNamespace(ctx, f, obj, info);
       if (!obj.metadata.name) throw new KubeError(`error: error when retrieving current configuration of:\nResource: "${info.plural}", GroupVersionKind: "${info.apiVersion}, Kind=${info.kind}"\nName: "", Namespace: "${obj.metadata.namespace ?? ""}"\nfrom server for: "${source}": resource name may not be empty`);
       const existing = cluster.get(info.kind, obj.metadata.name, obj.metadata.namespace);
+      authorize(ctx, existing ? "patch" : "create", info, obj.metadata.namespace, existing ? obj.metadata.name : undefined);
       validateFields(obj as unknown as Record<string, unknown>, existing ? "applying" : "creating", source);
       const lastApplied = JSON.stringify(raw);
       obj.metadata.annotations = { ...(obj.metadata.annotations ?? {}), [LAST_APPLIED]: lastApplied };
       if (!existing) {
-        const created = cluster.create(obj, { dryRun: isDry });
+        const created = withSource(() => cluster.create(obj, { dryRun: isDry }), source, "creating");
+        for (const w of cluster.takeWarnings()) err(ctx, `Warning: ${w}`);
         printed.push(created);
         if (!output) out(ctx, `${ref(info, created.metadata.name)} created${isDry ? " (dry run)" : ""}`);
       } else {
@@ -283,11 +298,13 @@ export async function createFromFiles(ctx: Ctx, f: Flags): Promise<number> {
       const info = kindOrThrow(raw.kind);
       const obj = deepClone(raw);
       prepareNamespace(ctx, f, obj, info);
+      authorize(ctx, "create", info, obj.metadata.namespace);
       validateFields(obj as unknown as Record<string, unknown>, "creating", source);
       if (obj.metadata.name && cluster.get(info.kind, obj.metadata.name, obj.metadata.namespace)) {
         throw new KubeError(`Error from server (AlreadyExists): error when creating "${source}": ${info.plural}${info.apiVersion.includes("/") ? "." + info.apiVersion.split("/")[0] : ""} "${obj.metadata.name}" already exists`);
       }
-      const created = cluster.create(obj, { dryRun: isDry });
+      const created = withSource(() => cluster.create(obj, { dryRun: isDry }), source, "creating");
+      for (const w of cluster.takeWarnings()) err(ctx, `Warning: ${w}`);
       printed.push(created);
       if (!output) out(ctx, `${ref(info, created.metadata.name)} created${isDry ? " (dry run)" : ""}`);
     } catch (e) {

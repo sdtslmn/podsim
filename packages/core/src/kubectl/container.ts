@@ -306,7 +306,7 @@ export function runInContainer(cluster: Cluster, pod: KObject, c: ContainerSpec,
     return { stdout: out, stderr: err, exitCode: code };
   }
   if (cmd === "sh" || cmd === "bash" || cmd === "/bin/sh" || cmd === "/bin/bash") {
-    return fail("(k8s-sim) interactive shells are not simulated yet. Pass the command directly, for example:\n  kubectl exec POD -- wget -qO- http://my-service\n  kubectl exec POD -- printenv APP_MODE", 1);
+    return fail("(podsim) interactive shells are not simulated yet. Pass the command directly, for example:\n  kubectl exec POD -- wget -qO- http://my-service\n  kubectl exec POD -- printenv APP_MODE", 1);
   }
   cmd = cmd.replace(/^\/(usr\/)?(s)?bin\//, "");
   if (!tools.has(cmd)) return notFound(cmd, viaShell);
@@ -381,7 +381,7 @@ export function runInContainer(cluster: Cluster, pod: KObject, c: ContainerSpec,
     case "ps":
       return ok("PID   USER     TIME  COMMAND\n    1 root      0:00 " + [...(c.command ?? []), ...(c.args ?? [])].join(" ") + "\n");
     default:
-      return fail(`(k8s-sim) "${cmd}" is not simulated yet inside containers.`, 127);
+      return fail(`(podsim) "${cmd}" is not simulated yet inside containers.`, 127);
   }
 }
 

@@ -120,7 +120,7 @@ export async function cmdGet(ctx: Ctx, f: Flags): Promise<number> {
     const clusterScoped = groups.every((g) => !g.info.namespaced);
     err(ctx, allNs || clusterScoped ? "No resources found" : `No resources found in ${ns} namespace.`);
   }
-  if (f.bool("watch")) err(ctx, "(k8s-sim) --watch is not simulated yet. Run the command again to see the latest state.");
+  if (f.bool("watch")) err(ctx, "(podsim) --watch is not simulated yet. Run the command again to see the latest state.");
   return errors.length ? 1 : 0;
 }
 
@@ -210,7 +210,7 @@ function prepareNamespace(ctx: Ctx, f: Flags, obj: KObject, info: KindInfo): voi
 
 export async function cmdApply(ctx: Ctx, f: Flags): Promise<number> {
   const { cluster } = ctx;
-  if (f.has("kustomize") || f.args[0] === "-k") throw new KubeError("(k8s-sim) kustomize (-k) is not simulated yet.");
+  if (f.has("kustomize") || f.args[0] === "-k") throw new KubeError("(podsim) kustomize (-k) is not simulated yet.");
   const files = f.all("filename");
   if (files.length === 0) throw new KubeError("error: must specify one of -f and -k");
   cluster.advance();

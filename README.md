@@ -1,10 +1,10 @@
-# k8s-sim
+# PodSim
 
 A Kubernetes training simulator for new learners. Practice `kubectl` on a simulated cluster, in your terminal or in the browser, with guided labs that check your work automatically.
 
 Nothing here runs real containers. The simulator models how Kubernetes objects behave: the scheduler places Pods on nodes, the kubelet pulls images and starts containers, Deployments roll out new ReplicaSets, Services collect endpoints. You see the same states, events and error messages a real cluster gives you, without installing anything or paying for a cluster.
 
-**Try it in the browser:** https://sdtslmn.github.io/k8s-sim/
+**Try it in the browser:** https://sdtslmn.github.io/podsim/
 
 ![The browser version running the Services lab](docs/images/web-lab.png)
 
@@ -12,15 +12,15 @@ Nothing here runs real containers. The simulator models how Kubernetes objects b
 
 Real practice clusters (Killercoda, KodeKloud, kind, minikube) are great once you know the basics. For a first contact they are often too much: you wait for VMs, things break in ways that have nothing to do with what you are learning, and you need an account or a powerful laptop.
 
-k8s-sim starts instantly, works offline, resets in a second and behaves the same every time. Use it to build muscle memory and understand what happens behind each command, then move to a real cluster.
+PodSim starts instantly, works offline, resets in a second and behaves the same every time. Use it to build muscle memory and understand what happens behind each command, then move to a real cluster.
 
 ## Quick start
 
 You need [Node.js](https://nodejs.org/) 20.19 or newer.
 
 ```bash
-git clone https://github.com/sdtslmn/k8s-sim.git
-cd k8s-sim
+git clone https://github.com/sdtslmn/podsim.git
+cd podsim
 npm install
 npm run sim            # builds and opens the practice shell
 ```
@@ -50,6 +50,12 @@ npm run dev:web                # then open the URL Vite prints
 ```
 
 The browser version runs entirely client side, so it can be hosted on GitHub Pages. The workflow in `.github/workflows/pages.yml` publishes it on every push to `main` once Pages is enabled for the repository (Settings, Pages, Source: GitHub Actions).
+
+## Teaching with the sandbox
+
+The sandbox is a fresh simulated cluster with no lab attached. Type a command and the class sees what a real cluster would do: Pods move from ContainerCreating to Running, a typo in an image name ends in ImagePullBackOff, a rolling update keeps the old Pods serving until the new ones are ready. Nothing is created anywhere outside the simulator, and `reset` brings back a clean cluster in a second, so you can repeat a demo as often as you like.
+
+In the browser, open the page, click Sandbox and put it on the projector. Learners can follow along on their own laptops with no setup.
 
 ## Labs
 
@@ -88,7 +94,7 @@ Not simulated yet: Jobs, CronJobs, DaemonSets, StatefulSets, NetworkPolicy enfor
 
 ```
 packages/core   simulated cluster engine, kubectl emulation, shell, lab runner (no Node APIs, runs in the browser too)
-packages/cli    terminal front end (readline, real files in ./k8s-sim-work)
+packages/cli    terminal front end (readline, real files in ./podsim-work)
 packages/web    browser front end (xterm.js, in-memory files)
 labs/           lab definitions in YAML
 ```

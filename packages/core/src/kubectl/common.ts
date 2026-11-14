@@ -47,7 +47,7 @@ export function nsOf(ctx: Ctx, f: Flags): string {
 
 export function plannedError(name: string): KubeError {
   const kind = PLANNED_KINDS[name.toLowerCase()];
-  return new KubeError(`(k8s-sim) ${kind} resources are not simulated yet. They are on the roadmap.`);
+  return new KubeError(`(podsim) ${kind} resources are not simulated yet. They are on the roadmap.`);
 }
 
 export function kindOrThrow(name: string): KindInfo {

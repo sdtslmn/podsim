@@ -7,7 +7,7 @@ export default defineConfig({
   resolve: {
     alias: {
       // Use the core sources directly, no separate build step needed.
-      "@k8s-sim/core": fileURLToPath(new URL("../core/src/index.ts", import.meta.url)),
+      "@podsim/core": fileURLToPath(new URL("../core/src/index.ts", import.meta.url)),
     },
   },
   server: {

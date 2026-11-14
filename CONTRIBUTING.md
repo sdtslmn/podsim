@@ -1,6 +1,6 @@
 # Contributing
 
-Thanks for helping. The two most useful contributions are new labs and fixes where k8s-sim behaves differently from a real cluster.
+Thanks for helping. The two most useful contributions are new labs and fixes where PodSim behaves differently from a real cluster.
 
 ## Setup
 
@@ -39,4 +39,4 @@ The core package must not use Node APIs, so it keeps working in the browser.
 
 - TypeScript, strict mode. Keep functions small and name things after the Kubernetes concept they model.
 - Output strings should match real kubectl exactly, including spacing.
-- Messages that are not real kubectl output start with `(k8s-sim)` so learners can tell the difference.
+- Messages that are not real kubectl output start with `(podsim)` so learners can tell the difference.

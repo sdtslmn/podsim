@@ -9,7 +9,7 @@
     "noEmit": true,
     "types": ["vite/client"],
     "paths": {
-      "@k8s-sim/core": ["../core/src/index.ts"]
+      "@podsim/core": ["../core/src/index.ts"]
     }
   },
   "include": ["src", "../core/src"],

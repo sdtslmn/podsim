@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// k8s-sim terminal: a kubectl practice shell on a simulated cluster,
+// PodSim terminal: a kubectl practice shell on a simulated cluster,
 // with guided labs and automatic checks.
 
 import * as fs from "node:fs";
@@ -7,7 +7,7 @@ import * as path from "node:path";
 import * as readline from "node:readline";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
-import { Cluster, Shell, LabSession, MemoryFS, parseLab, K8S_VERSION, type IO, type Lab } from "@k8s-sim/core";
+import { Cluster, Shell, LabSession, MemoryFS, parseLab, K8S_VERSION, type IO, type Lab } from "@podsim/core";
 import { NodeFS } from "./nodefs.js";
 
 const VERSION = "0.1.0";
@@ -71,8 +71,8 @@ interface Options {
 
 function parseCli(argv: string[]): Options {
   const opts: Options = {
-    labsDir: process.env.K8S_SIM_LABS ?? findLabsDir(),
-    workDir: process.env.K8S_SIM_WORKDIR ?? path.resolve(process.cwd(), "k8s-sim-work"),
+    labsDir: process.env.PODSIM_LABS ?? findLabsDir(),
+    workDir: process.env.PODSIM_WORKDIR ?? path.resolve(process.cwd(), "podsim-work"),
   };
   const rest: string[] = [];
   for (let i = 0; i < argv.length; i++) {
@@ -81,7 +81,7 @@ function parseCli(argv: string[]): Options {
     else if (a === "--workdir") opts.workDir = path.resolve(argv[++i]);
     else if (a === "-c" || a === "--exec") opts.exec = argv[++i];
     else if (a === "-v" || a === "--version") {
-      console.log(`k8s-sim ${VERSION} (simulated Kubernetes ${K8S_VERSION})`);
+      console.log(`PodSim ${VERSION} (simulated Kubernetes ${K8S_VERSION})`);
       process.exit(0);
     } else if (a === "-h" || a === "--help") {
       printUsage();
@@ -99,18 +99,18 @@ function findLabsDir(): string {
 }
 
 function printUsage(): void {
-  console.log(`k8s-sim ${VERSION}: Kubernetes training simulator
+  console.log(`PodSim ${VERSION}: Kubernetes training simulator
 
 Usage:
-  k8s-sim                     open the practice shell (free sandbox)
-  k8s-sim labs                list the labs
-  k8s-sim lab <id|number>     start a lab, e.g. k8s-sim lab 1
-  k8s-sim validate-labs       check that every lab is solved by its own solution
-  k8s-sim -c "<command>"      run one command on a fresh cluster and exit
+  podsim                     open the practice shell (free sandbox)
+  podsim labs                list the labs
+  podsim lab <id|number>     start a lab, e.g. podsim lab 1
+  podsim validate-labs       check that every lab is solved by its own solution
+  podsim -c "<command>"      run one command on a fresh cluster and exit
 
 Options:
   --labs <dir>      folder with lab YAML files (default: the repo's labs folder)
-  --workdir <dir>   where your files go (default: ./k8s-sim-work)
+  --workdir <dir>   where your files go (default: ./podsim-work)
   -v, --version     print the version`);
 }
 
@@ -252,7 +252,7 @@ class Repl {
   private shellOptions(nodefs: NodeFS) {
     return {
       openEditor: (file: string) => {
-        const editor = process.env.K8S_SIM_EDITOR ?? process.env.VISUAL ?? process.env.EDITOR;
+        const editor = process.env.PODSIM_EDITOR ?? process.env.VISUAL ?? process.env.EDITOR;
         if (!editor) return false;
         const target = nodefs.absolute(file);
         if (!fs.existsSync(target)) fs.writeFileSync(target, "");
@@ -394,7 +394,7 @@ class Repl {
       return 0;
     });
     s.registerCommand("help", () => {
-      this.print(`${bold("k8s-sim help")}
+      this.print(`${bold("PodSim help")}
   kubectl ... (or k ...)   run kubectl against the simulated cluster
   labs                     list the labs          lab <n>    start lab n
   task                     show the tasks again   check      check your work
@@ -454,7 +454,7 @@ EDITOR (e.g. EDITOR="code --wait") to open them with vi/nano/code from here.`);
 
   async run(firstLab?: string): Promise<void> {
     this.startSandbox();
-    this.print(`${bold("k8s-sim")} ${VERSION}  ${dim("Kubernetes training simulator. Nothing here runs real containers.")}`);
+    this.print(`${bold("PodSim")} ${VERSION}  ${dim("Kubernetes training simulator. Nothing here runs real containers.")}`);
     this.print(dim(`Simulated cluster: controlplane, node01, node02 (Kubernetes ${K8S_VERSION})`));
     if (firstLab) {
       const lab = findLab(this.labs, firstLab);
@@ -508,7 +508,7 @@ EDITOR (e.g. EDITOR="code --wait") to open them with vi/nano/code from here.`);
       this.aborted = false;
       const io: IO = {
         stdout: (t) => this.write(t),
-        stderr: (t) => this.write(t.startsWith("(k8s-sim)") ? yellow(t) : t),
+        stderr: (t) => this.write(t.startsWith("(podsim)") ? yellow(t) : t),
         sleep: (ms) => new Promise((r) => setTimeout(r, ms)),
         aborted: () => this.aborted,
       };
@@ -550,7 +550,7 @@ async function main(): Promise<void> {
       return;
     case "lab":
       if (!opts.labArg) {
-        console.error("Usage: k8s-sim lab <id|number>");
+        console.error("Usage: podsim lab <id|number>");
         process.exit(1);
       }
       await new Repl(opts).run(opts.labArg);
@@ -559,7 +559,7 @@ async function main(): Promise<void> {
       process.exit(await validateLabs(loadLabs(opts.labsDir)));
       return;
     default:
-      console.error(`Unknown command "${opts.command}". Run k8s-sim --help.`);
+      console.error(`Unknown command "${opts.command}". Run podsim --help.`);
       process.exit(1);
   }
 }

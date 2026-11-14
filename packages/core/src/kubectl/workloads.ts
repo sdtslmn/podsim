@@ -93,7 +93,7 @@ export async function cmdRun(ctx: Ctx, f: Flags): Promise<number> {
     return 0;
   }
   if (!extra.length) {
-    err(ctx, "(k8s-sim) interactive shells are not simulated yet. Add a command after --, for example:\n  kubectl run tmp --rm -it --image=busybox --restart=Never -- wget -qO- http://my-service");
+    err(ctx, "(podsim) interactive shells are not simulated yet. Add a command after --, for example:\n  kubectl run tmp --rm -it --image=busybox --restart=Never -- wget -qO- http://my-service");
     if (f.bool("rm")) {
       cluster.remove("Pod", name, ns);
       out(ctx, `pod "${name}" deleted`);
@@ -320,9 +320,9 @@ export async function cmdCreate(ctx: Ctx, f: Flags): Promise<number> {
     case "cronjob":
     case "daemonset":
     case "statefulset":
-      throw new KubeError(`(k8s-sim) ${sub} resources are not simulated yet. They are on the roadmap.`);
+      throw new KubeError(`(podsim) ${sub} resources are not simulated yet. They are on the roadmap.`);
     case "ingress":
-      throw new KubeError("(k8s-sim) `kubectl create ingress` is not simulated yet. Write an Ingress manifest and use kubectl apply -f.");
+      throw new KubeError("(podsim) `kubectl create ingress` is not simulated yet. Write an Ingress manifest and use kubectl apply -f.");
     default:
       throw new KubeError(`error: Unexpected args: [${sub}]\nSee 'kubectl create -h' for help and examples`);
   }
@@ -576,7 +576,7 @@ export async function cmdRollout(ctx: Ctx, f: Flags): Promise<number> {
   if (!subs.includes(sub ?? "")) throw new KubeError(`error: unknown command "${sub ?? ""}" for "kubectl rollout"\nAvailable Commands: ${subs.join(", ")}`);
   const { info, name } = singleTarget(rest, `rollout ${sub}`);
   if (info.kind !== "Deployment") {
-    if (["DaemonSet", "StatefulSet"].includes(info.kind)) throw new KubeError(`(k8s-sim) ${info.kind} rollouts are not simulated yet.`);
+    if (["DaemonSet", "StatefulSet"].includes(info.kind)) throw new KubeError(`(podsim) ${info.kind} rollouts are not simulated yet.`);
     throw new KubeError(`error: no ${sub === "history" ? "history viewer" : sub === "status" ? "status viewer" : "rollbacker"} has been implemented for "${info.kind}"`);
   }
   let d = cluster.get("Deployment", name, ns);
@@ -607,7 +607,7 @@ export async function cmdRollout(ctx: Ctx, f: Flags): Promise<number> {
             err(ctx, "error: timed out waiting for the condition");
             return 1;
           }
-          err(ctx, `(k8s-sim) stopped waiting after ${Math.round(timeout / 1000)}s. The rollout is still in progress. Check the pods with: kubectl get pods`);
+          err(ctx, `(podsim) stopped waiting after ${Math.round(timeout / 1000)}s. The rollout is still in progress. Check the pods with: kubectl get pods`);
           return 1;
         }
         await ctx.io.sleep(1000);

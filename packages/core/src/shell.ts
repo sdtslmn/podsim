@@ -229,7 +229,7 @@ export class Shell {
           const next = st[i + 1];
           if (t.value === ">" || t.value === ">>") {
             if (!next || next.type !== "word") {
-              io.stderr("k8s-sim: syntax error near unexpected token `newline'\n");
+              io.stderr("podsim: syntax error near unexpected token `newline'\n");
               return 2;
             }
             outFile = { path: next.value, append: t.value === ">>" };
@@ -239,7 +239,7 @@ export class Shell {
               try {
                 stdin = this.fs.readFile(next.value);
               } catch {
-                io.stderr(`k8s-sim: ${next.value}: No such file or directory\n`);
+                io.stderr(`podsim: ${next.value}: No such file or directory\n`);
                 return 1;
               }
               i++;
@@ -381,7 +381,7 @@ export class Shell {
         out(this.fs.cwd() + "\n");
         return 0;
       case "cd":
-        io.stderr(`(k8s-sim) cd is not supported. Your files live in ${this.fs.cwd()}\n`);
+        io.stderr(`(podsim) cd is not supported. Your files live in ${this.fs.cwd()}\n`);
         return 1;
       case "mkdir":
         for (const a of args.filter((x) => !x.startsWith("-"))) this.fs.mkdir(a);
@@ -488,7 +488,7 @@ export class Shell {
         const prog = args.find((a) => a.includes("{")) ?? "";
         const m = prog.match(/^\s*(NR\s*([<>=!]=?|==)\s*(\d+))?\s*\{\s*print\s*(.*?)\s*\}\s*$/);
         if (!m) {
-          io.stderr("(k8s-sim) only simple awk programs like '{print $1}' are supported\n");
+          io.stderr("(podsim) only simple awk programs like '{print $1}' are supported\n");
           return 1;
         }
         const fields = m[4] ? m[4].split(/\s*,\s*|\s+/) : ["$0"];
@@ -592,11 +592,11 @@ export class Shell {
       case "code": {
         const file = args.find((a) => !a.startsWith("-"));
         if (file && this.opts.openEditor && (await this.opts.openEditor(file))) return 0;
-        io.stderr(`(k8s-sim) ${cmd} is not available inside the simulator. Edit the file with your own editor (it is in ${this.fs.cwd()}), or write it with a heredoc:\n  cat <<EOF > ${file ?? "pod.yaml"}\n  ...\n  EOF\n`);
+        io.stderr(`(podsim) ${cmd} is not available inside the simulator. Edit the file with your own editor (it is in ${this.fs.cwd()}), or write it with a heredoc:\n  cat <<EOF > ${file ?? "pod.yaml"}\n  ...\n  EOF\n`);
         return 1;
       }
       case "watch":
-        io.stderr("(k8s-sim) watch is not simulated yet. Run the command again to refresh.\n");
+        io.stderr("(podsim) watch is not simulated yet. Run the command again to refresh.\n");
         return 1;
       case "jq":
       case "yq":
@@ -610,11 +610,11 @@ export class Shell {
       case "ssh":
       case "curl":
       case "wget":
-        io.stderr(`(k8s-sim) ${cmd} is not available on the simulator host yet. ${cmd === "curl" || cmd === "wget" ? "Run it inside a pod instead, e.g. kubectl exec POD -- wget -qO- http://SERVICE" : "It is on the roadmap."}\n`);
+        io.stderr(`(podsim) ${cmd} is not available on the simulator host yet. ${cmd === "curl" || cmd === "wget" ? "Run it inside a pod instead, e.g. kubectl exec POD -- wget -qO- http://SERVICE" : "It is on the roadmap."}\n`);
         return 127;
       default:
         if (NOOP_COMMANDS.has(cmd)) return 0;
-        io.stderr(`k8s-sim: ${cmd}: command not found\n`);
+        io.stderr(`podsim: ${cmd}: command not found\n`);
         return 127;
     }
   }

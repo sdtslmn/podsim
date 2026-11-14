@@ -94,7 +94,7 @@ export async function cmdLogs(ctx: Ctx, f: Flags): Promise<number> {
       if (lines.length) out(ctx, lines.map((l) => prefix + l).join("\n"));
     }
   }
-  if (follow) err(ctx, "(k8s-sim) --follow is not simulated yet; showing the logs collected so far.");
+  if (follow) err(ctx, "(podsim) --follow is not simulated yet; showing the logs collected so far.");
   return code;
 }
 
@@ -119,7 +119,7 @@ export async function cmdExec(ctx: Ctx, f: Flags): Promise<number> {
   const r = runInContainer(cluster, pod, c, f.rest);
   if (r.stdout) ctx.io.stdout(r.stdout);
   if (r.stderr) err(ctx, r.stderr.replace(/\n$/, ""));
-  if (r.exitCode !== 0 && !r.stderr.startsWith("error:") && !r.stderr.startsWith("(k8s-sim)")) err(ctx, `command terminated with exit code ${r.exitCode}`);
+  if (r.exitCode !== 0 && !r.stderr.startsWith("error:") && !r.stderr.startsWith("(podsim)")) err(ctx, `command terminated with exit code ${r.exitCode}`);
   return r.exitCode;
 }
 
@@ -252,7 +252,7 @@ export async function cmdConfig(ctx: Ctx, f: Flags): Promise<number> {
       out(ctx, `Switched to context "${CONTEXT}".`);
       return 0;
     case "set-context": {
-      if (!f.bool("current") && rest[0] !== CONTEXT) throw new KubeError(`(k8s-sim) only the current context "${CONTEXT}" exists in the simulator. Use: kubectl config set-context --current --namespace=NAME`);
+      if (!f.bool("current") && rest[0] !== CONTEXT) throw new KubeError(`(podsim) only the current context "${CONTEXT}" exists in the simulator. Use: kubectl config set-context --current --namespace=NAME`);
       const ns = f.str("namespace");
       if (ns) ctx.state.namespace = ns;
       out(ctx, `Context "${CONTEXT}" modified.`);
@@ -289,7 +289,7 @@ export async function cmdAuth(ctx: Ctx, f: Flags): Promise<number> {
     return 0;
   }
   if (sub !== "can-i") throw new KubeError(`error: unknown command "${sub ?? ""}" for "kubectl auth"\nAvailable Commands: can-i, whoami`);
-  if (f.bool("list")) throw new KubeError("(k8s-sim) auth can-i --list is not simulated yet. Ask about one verb and resource at a time.");
+  if (f.bool("list")) throw new KubeError("(podsim) auth can-i --list is not simulated yet. Ask about one verb and resource at a time.");
   const [verb, resourceArg, maybeName] = rest;
   if (!verb || !resourceArg) throw new KubeError("error: you must specify two arguments: verb resource or a URL path");
   let resource = resourceArg;
@@ -414,12 +414,12 @@ export function cmdExplain(ctx: Ctx, f: Flags): number {
   const what = f.args[0];
   if (!what) throw new KubeError("error: You must specify the type of resource to explain. Use \"kubectl api-resources\" for a complete list of supported resources.");
   const kind = kindOrThrow(what.split(".")[0]);
-  err(ctx, `(k8s-sim) explain is not simulated yet. Field reference for ${kind.kind}: https://kubernetes.io/docs/reference/kubernetes-api/`);
+  err(ctx, `(podsim) explain is not simulated yet. Field reference for ${kind.kind}: https://kubernetes.io/docs/reference/kubernetes-api/`);
   return 1;
 }
 
 export function notSimulated(ctx: Ctx, cmd: string): number {
-  err(ctx, `(k8s-sim) "kubectl ${cmd}" is not simulated yet.`);
+  err(ctx, `(podsim) "kubectl ${cmd}" is not simulated yet.`);
   return 1;
 }
 
@@ -427,7 +427,7 @@ export function cmdEdit(ctx: Ctx, f: Flags): number {
   const target = f.args.join(" ") || "TYPE NAME";
   err(
     ctx,
-    `(k8s-sim) kubectl edit needs an interactive editor, which the simulator does not have. Do this instead:\n  kubectl get ${target} -o yaml > obj.yaml\n  # change obj.yaml in your editor\n  kubectl apply -f obj.yaml        (or: kubectl replace --force -f obj.yaml for pods)`,
+    `(podsim) kubectl edit needs an interactive editor, which the simulator does not have. Do this instead:\n  kubectl get ${target} -o yaml > obj.yaml\n  # change obj.yaml in your editor\n  kubectl apply -f obj.yaml        (or: kubectl replace --force -f obj.yaml for pods)`,
   );
   return 1;
 }

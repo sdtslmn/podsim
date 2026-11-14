@@ -35,6 +35,6 @@ The plan, roughly in order. Open an issue if you want to work on something or th
 
 ## Later
 
-- Publish the CLI to npm so `npx k8s-sim` works without cloning
+- Publish the CLI to npm so `npx podsim` works without cloning
 - Translations of the lab text
 - Instructor view: a class code and a progress board for a group of learners

@@ -5,10 +5,10 @@ import "@xterm/xterm/css/xterm.css";
 import "./style.css";
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
-import { Cluster, Shell, LabSession, MemoryFS, parseLab, K8S_VERSION, type IO, type Lab, type CheckResult } from "@k8s-sim/core";
+import { Cluster, Shell, LabSession, MemoryFS, parseLab, K8S_VERSION, type IO, type Lab, type CheckResult } from "@podsim/core";
 import { LineEditor } from "./line-editor";
 
-const REPO_URL: string = import.meta.env.VITE_REPO_URL ?? "https://github.com/sdtslmn/k8s-sim";
+const REPO_URL: string = import.meta.env.VITE_REPO_URL ?? "https://github.com/sdtslmn/podsim";
 
 // ---------------------------------------------------------------- labs
 
@@ -26,7 +26,7 @@ const labs: Lab[] = Object.entries(rawLabs)
   .filter((l): l is Lab => !!l)
   .sort((a, b) => LEVELS[a.level] - LEVELS[b.level] || a.id.localeCompare(b.id));
 
-const PROGRESS_KEY = "k8s-sim.progress";
+const PROGRESS_KEY = "podsim.progress";
 function loadProgress(): Set<string> {
   try {
     return new Set(JSON.parse(localStorage.getItem(PROGRESS_KEY) ?? "[]") as string[]);
@@ -107,7 +107,7 @@ const print = (s = "") => term.write(s + "\n");
 
 const io: IO = {
   stdout: (t) => term.write(t),
-  stderr: (t) => term.write(t.startsWith("(k8s-sim)") ? C.yellow(t) : t),
+  stderr: (t) => term.write(t.startsWith("(podsim)") ? C.yellow(t) : t),
   sleep: (ms) => new Promise((r) => setTimeout(r, ms)),
   aborted: () => aborted,
 };
@@ -327,7 +327,7 @@ function registerCommands(): void {
     return 0;
   });
   shell.registerCommand("help", () => {
-    print(`${C.bold("k8s-sim help")}
+    print(`${C.bold("PodSim help")}
   kubectl ... (or k ...)   run kubectl against the simulated cluster
   labs / lab <n>           list labs / start lab n
   task, check, hint        show tasks, check your work, get a hint
@@ -505,7 +505,7 @@ document.getElementById("nav-files")!.addEventListener("click", () => {
 startSandbox(false);
 view = "labs";
 renderPanel();
-print(C.bold("k8s-sim") + C.dim("  Kubernetes training simulator. Nothing here runs real containers."));
+print(C.bold("PodSim") + C.dim("  Kubernetes training simulator. Nothing here runs real containers."));
 print(C.dim(`Simulated cluster: controlplane, node01, node02 (Kubernetes ${K8S_VERSION})`));
 print("");
 print(`Pick a lab on the left, type ${C.cyan("lab 1")}, or just use ${C.cyan("kubectl")}. Type ${C.cyan("help")} for commands.`);

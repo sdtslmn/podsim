@@ -113,7 +113,7 @@ export class Kubectl {
     }
     const f = new Flags(parseArgs(rest));
     if (f.bool("help")) {
-      ctx.io.stdout(`(k8s-sim) Help for "kubectl ${cmd}" is not included. See https://kubernetes.io/docs/reference/kubectl/generated/kubectl_${cmd}/\n`);
+      ctx.io.stdout(`(podsim) Help for "kubectl ${cmd}" is not included. See https://kubernetes.io/docs/reference/kubectl/generated/kubectl_${cmd}/\n`);
       return 0;
     }
     switch (cmd) {

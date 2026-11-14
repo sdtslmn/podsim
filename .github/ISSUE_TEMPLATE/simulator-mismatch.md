@@ -10,7 +10,7 @@ labels: fidelity
 kubectl ...
 ```
 
-**What k8s-sim printed**
+**What PodSim printed**
 
 ```
 ```
@@ -20,4 +20,4 @@ kubectl ...
 ```
 ```
 
-**Where you ran it**: CLI or browser, and the k8s-sim version (`k8s-sim --version`).
+**Where you ran it**: CLI or browser, and the PodSim version (`podsim --version`).

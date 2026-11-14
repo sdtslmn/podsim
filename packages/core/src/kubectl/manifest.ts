@@ -50,7 +50,7 @@ export function loadFiles(fs: FileSystem, names: string[], stdin: string | undef
       continue;
     }
     if (/^https?:\/\//.test(name)) {
-      throw new KubeError(`error: unable to read URL "${name}": (k8s-sim) the simulator has no internet access. Save the manifest to a local file and use -f with that file.`);
+      throw new KubeError(`error: unable to read URL "${name}": (podsim) the simulator has no internet access. Save the manifest to a local file and use -f with that file.`);
     }
     if (!fs.exists(name)) throw new KubeError(`error: the path "${name}" does not exist`);
     if (fs.isDirectory(name)) {

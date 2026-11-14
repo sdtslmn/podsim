@@ -1,5 +1,5 @@
 {
-  "name": "k8s-sim",
+  "name": "podsim",
   "version": "0.1.0",
   "private": true,
   "description": "A Kubernetes training simulator for new learners. Practice kubectl in a simulated cluster, in the terminal or the browser.",
@@ -12,8 +12,8 @@
   ],
   "scripts": {
     "build": "tsc -b packages/core packages/cli",
-    "build:web": "npm run build --workspace @k8s-sim/web",
-    "dev:web": "npm run dev --workspace @k8s-sim/web",
+    "build:web": "npm run build --workspace @podsim/web",
+    "dev:web": "npm run dev --workspace @podsim/web",
     "clean": "tsc -b --clean packages/core packages/cli",
     "test": "vitest run",
     "start": "node packages/cli/dist/index.js",

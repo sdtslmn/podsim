@@ -3,7 +3,7 @@
 
 import * as fs from "node:fs";
 import * as path from "node:path";
-import type { FileSystem } from "@k8s-sim/core";
+import type { FileSystem } from "@podsim/core";
 
 export class NodeFS implements FileSystem {
   constructor(private root: string) {
@@ -14,7 +14,7 @@ export class NodeFS implements FileSystem {
     const full = path.resolve(this.root, p.replace(/^~\//, ""));
     const rel = path.relative(this.root, full);
     if (rel.startsWith("..") || path.isAbsolute(rel)) {
-      throw new Error(`${p}: outside the k8s-sim work folder (${this.root})`);
+      throw new Error(`${p}: outside the podsim work folder (${this.root})`);
     }
     return full;
   }

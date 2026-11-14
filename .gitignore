@@ -6,4 +6,4 @@ coverage/
 Thumbs.db
 .vscode/
 .idea/
-k8s-sim-work/
+podsim-work/

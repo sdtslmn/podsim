@@ -455,7 +455,57 @@ export async function cmdCreate(ctx: Ctx, f: Flags): Promise<number> {
     case "statefulset":
       throw new KubeError(`error: Unexpected args: [${sub}]\nSee 'kubectl create -h' for help and examples. (Write a ${sub === "daemonset" ? "DaemonSet" : "StatefulSet"} manifest: a quick start is kubectl create deployment NAME --image=IMAGE --dry-run=client -o yaml, then change the kind.)`);
     case "ingress":
-      throw new KubeError("(podsim) `kubectl create ingress` is not simulated yet. Write an Ingress manifest and use kubectl apply -f.");
+    case "ing": {
+      const name = rest[0];
+      if (!name) throw new KubeError("error: exactly one NAME is required, got 0");
+      const rules: Record<string, any>[] = [];
+      const tls: Record<string, any>[] = [];
+      const backendOf = (target: string) => {
+        const [svc, port] = target.split(":");
+        if (!svc || !port) throw new KubeError(`error: rule ${target} is invalid and should be in format host/path=svcname:svcport[,tls[=secret]]`);
+        return { service: { name: svc, port: /^\d+$/.test(port) ? { number: parseInt(port, 10) } : { name: port } } };
+      };
+      for (const r of f.all("rule")) {
+        const [main, ...opts] = r.split(",");
+        const eq = main.indexOf("=");
+        if (eq < 0) throw new KubeError(`error: rule ${r} is invalid and should be in format host/path=svcname:svcport[,tls[=secret]]`);
+        const hostPath = main.slice(0, eq);
+        const slash = hostPath.indexOf("/");
+        const host = slash >= 0 ? hostPath.slice(0, slash) : hostPath;
+        let path = slash >= 0 ? hostPath.slice(slash) : "/";
+        let pathType = "Exact";
+        if (path.endsWith("*")) {
+          path = path.slice(0, -1) || "/";
+          pathType = "Prefix";
+        }
+        const entry = { path, pathType, backend: backendOf(main.slice(eq + 1)) };
+        const existing = rules.find((x) => (x.host ?? "") === host);
+        if (existing) existing.http.paths.push(entry);
+        else rules.push({ ...(host ? { host } : {}), http: { paths: [entry] } });
+        for (const o of opts) {
+          if (o.startsWith("tls")) {
+            const secret = o.includes("=") ? o.split("=")[1] : undefined;
+            tls.push({ ...(host ? { hosts: [host] } : {}), ...(secret ? { secretName: secret } : {}) });
+          }
+        }
+      }
+      const spec: Record<string, unknown> = {};
+      const cls = f.str("class");
+      if (cls) spec.ingressClassName = cls;
+      const def = f.str("default-backend");
+      if (def) spec.defaultBackend = backendOf(def);
+      if (rules.length) spec.rules = rules;
+      if (tls.length) spec.tls = tls;
+      const annotations = f.all("annotation");
+      obj = {
+        apiVersion: "networking.k8s.io/v1",
+        kind: "Ingress",
+        metadata: { name, ...nsMeta, ...(annotations.length ? { annotations: parseKV(annotations, "annotation") } : {}) },
+        spec,
+        status: { loadBalancer: {} },
+      };
+      break;
+    }
     default:
       throw new KubeError(`error: Unexpected args: [${sub}]\nSee 'kubectl create -h' for help and examples`);
   }

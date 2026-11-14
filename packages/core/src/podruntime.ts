@@ -333,6 +333,16 @@ const IMAGES: Record<string, ImageInfo> = {
 
 export function imageInfo(image: string): ImageInfo | undefined {
   const p = parseImage(image);
+  if (p.registry === "registry.k8s.io" && p.repository === "ingress-nginx/controller") {
+    return {
+      tools: BUSYBOX_TOOLS,
+      user: 101,
+      memMi: 90,
+      shell: false,
+      defaultScript: () =>
+        `echo "-------------------------------------------------------------------------------"; echo "NGINX Ingress controller"; echo "  Release:       v1.14.0"; echo "-------------------------------------------------------------------------------"; echo 'I1114 10:00:01.000000       7 main.go:205] "Creating API client" host="https://10.96.0.1:443"'; echo 'I1114 10:00:02.000000       7 nginx.go:273] "Starting NGINX Ingress controller"'; __serve ingress 80,443`,
+    };
+  }
   if (p.registry === "registry.k8s.io" || p.registry === "k8s.gcr.io" || p.registry === "quay.io") {
     return { tools: BUSYBOX_TOOLS, user: 0, memMi: 15, shell: false, defaultScript: () => "sleep infinity" };
   }
@@ -347,8 +357,9 @@ export function processFor(c: ContainerSpec, env: Record<string, string>): { arg
   const shellOnly = argv.length === 0 ? !!info?.shell : argv.length === 1 && /^(\/bin\/)?(sh|bash|ash)$/.test(argv[0]);
   if (c.stdin && shellOnly) return { script: "sleep infinity" };
   if (argv.length) {
-    if (!c.command?.length && info && !info.shell && info.defaultScript && parseImage(c.image).repository.startsWith("hashicorp")) return { script: info.defaultScript(c, env) };
-    if (!c.command?.length && info && !info.shell && parseImage(c.image).repository === "traefik/whoami") return { script: info.defaultScript!(c, env) };
+    const repo = parseImage(c.image).repository;
+    const binary = repo === "hashicorp/http-echo" ? /^\/?(http-echo)$/ : repo === "traefik/whoami" ? /^\/?(whoami)$/ : undefined;
+    if (binary && info?.defaultScript && (binary.test(argv[0]) || argv[0].startsWith("-"))) return { script: info.defaultScript({ ...c, command: [], args: argv.filter((a) => !binary.test(a)) }, env) };
     return { argv };
   }
   if (info?.defaultScript) return { script: info.defaultScript(c, env) };
@@ -838,9 +849,20 @@ function isReady(p: KObject): boolean {
 /** Hook for NetworkPolicy: may traffic from `from` reach `to` on `port`? */
 let policyCheck: (cluster: Cluster, from: KObject | undefined, to: KObject, port: number, protocol: string) => boolean = () => true;
 let egressCheck: (cluster: Cluster, from: KObject | undefined, toIp: string, port: number, protocol: string, to?: KObject) => boolean = () => true;
-export function setPolicyChecks(ingress: typeof policyCheck, egress: typeof egressCheck): void {
+let dnsCheck: (cluster: Cluster, from: KObject | undefined) => boolean = () => true;
+export function setPolicyChecks(ingress: typeof policyCheck, egress: typeof egressCheck, dns?: typeof dnsCheck): void {
   policyCheck = ingress;
   egressCheck = egress;
+  if (dns) dnsCheck = dns;
+}
+
+const NODE_NAMES = ["controlplane", "node01", "node02", "node03", "node04"];
+
+/** The node an address or name refers to, if any. */
+function nodeFor(cluster: Cluster, host: string, from: KObject | undefined): KObject | undefined {
+  const h = host.toLowerCase();
+  if ((h === "localhost" || h === "127.0.0.1") && !from) return cluster.get("Node", "controlplane");
+  return cluster.list("Node").find((n) => n.metadata.name === h || (n.status?.addresses ?? []).some((a: { address: string }) => a.address === h));
 }
 
 export type Conn =
@@ -862,6 +884,25 @@ export function podListener(cluster: Cluster, pod: KObject, port: number): { con
 
 /** Open a connection from `from` (a pod, or undefined for a node) to host:port, following Services. */
 export function connect(cluster: Cluster, from: KObject | undefined, ns: string, host: string, port: number, protocol = "TCP"): { conn: Conn; target?: Target } {
+  const isIp = /^\d+\.\d+\.\d+\.\d+$/.test(host);
+  if (!from && (host === "localhost" || host === "127.0.0.1")) {
+    const fwd = (cluster.scratch.get("portforwards") as Record<number, { pod: string; ns: string; port: number }> | undefined)?.[port];
+    if (fwd) {
+      const pod = cluster.get("Pod", fwd.pod, fwd.ns);
+      const l = pod ? podListener(cluster, pod, fwd.port) : undefined;
+      return { conn: pod && l ? { ok: true, pod, port: fwd.port, ...l } : { ok: false, error: "refused" }, target: { ip: "127.0.0.1", pod } };
+    }
+  }
+  const node = nodeFor(cluster, host, from);
+  if (node && (isIp || NODE_NAMES.includes(host.toLowerCase()) || host === "localhost" || host === "127.0.0.1")) {
+    const nodeIp = (node.status?.addresses ?? []).find((a: { type: string }) => a.type === "InternalIP")?.address ?? host;
+    const svc = cluster.list("Service").find((sv) => (sv.spec?.ports ?? []).some((p: { nodePort?: number }) => p.nodePort === port));
+    if (!svc) return { conn: { ok: false, error: "refused" }, target: { ip: nodeIp } };
+    const sp = svc.spec.ports.find((p: { nodePort?: number }) => p.nodePort === port);
+    return connect(cluster, from, svc.metadata.namespace ?? "default", svc.spec.clusterIP, sp.port, protocol);
+  }
+  if (!isIp && host !== "localhost" && !dnsCheck(cluster, from)) return { conn: { ok: false, error: "unresolved" } };
+  if (!from && !isIp && host !== "localhost") return { conn: { ok: false, error: "unresolved" } };
   const target = resolveHost(cluster, ns, host);
   if (!target) return { conn: { ok: false, error: "unresolved" } };
   if (target.ip === "127.0.0.1" && from) {
@@ -906,7 +947,7 @@ export interface HttpResponse {
   headers?: Record<string, string>;
 }
 
-const STATUS_TEXT: Record<number, string> = { 200: "OK", 301: "Moved Permanently", 302: "Found", 400: "Bad Request", 403: "Forbidden", 404: "Not Found", 500: "Internal Server Error", 502: "Bad Gateway", 503: "Service Unavailable" };
+const STATUS_TEXT: Record<number, string> = { 200: "OK", 301: "Moved Permanently", 302: "Found", 400: "Bad Request", 403: "Forbidden", 404: "Not Found", 500: "Internal Server Error", 502: "Bad Gateway", 503: "Service Temporarily Unavailable", 504: "Gateway Time-out" };
 export const statusText = (n: number) => STATUS_TEXT[n] ?? "";
 
 function nginxErrorPage(code: number): string {
@@ -922,6 +963,8 @@ export function serveHttp(cluster: Cluster, pod: KObject, c: ContainerSpec, cs: 
   switch (server.kind) {
     case "tcp":
       return undefined;
+    case "ingress":
+      return ingressRoute(cluster, pod, hostHeader, path, client);
     case "text":
       res = { status: 200, body: server.body.endsWith("\n") ? server.body : server.body + "\n" };
       break;
@@ -972,23 +1015,86 @@ function staticFile(fs: Fs, root: string, path: string, style: "nginx" | "busybo
 }
 
 /** One HTTP request from a pod (or a node when `from` is undefined). */
-export function httpRequest(cluster: Cluster, from: KObject | undefined, ns: string, url: string, agent: string): { res?: HttpResponse; error?: string; host: string; port: number; ip?: string } {
+/** The ingress-nginx controller: pick an Ingress rule by host and path and proxy to its Service. */
+function ingressRoute(cluster: Cluster, controller: KObject, hostHeader: string, path: string, client: { ip: string; agent: string }): HttpResponse {
+  const host = hostHeader.replace(/:\d+$/, "").toLowerCase();
+  const classes = cluster.list("IngressClass").filter((c) => c.spec?.controller === "k8s.io/ingress-nginx");
+  const defaultClass = classes.find((c) => c.metadata.annotations?.["ingressclass.kubernetes.io/is-default-class"] === "true")?.metadata.name;
+  const mine = new Set(classes.map((c) => c.metadata.name));
+  const notFound = (): HttpResponse => ({ status: 404, body: nginxErrorPage(404) });
+  type Cand = { ing: KObject; rule: Record<string, any>; p: Record<string, any>; score: number };
+  const cands: Cand[] = [];
+  for (const ing of cluster.list("Ingress")) {
+    const cls = ing.spec?.ingressClassName ?? ing.metadata.annotations?.["kubernetes.io/ingress.class"] ?? defaultClass;
+    if (!cls || !mine.has(cls)) continue;
+    const regex = ing.metadata.annotations?.["nginx.ingress.kubernetes.io/use-regex"] === "true";
+    for (const rule of (ing.spec?.rules ?? []) as Record<string, any>[]) {
+      const rh = (rule.host ?? "").toLowerCase();
+      const hostOk = !rh || rh === host || (rh.startsWith("*.") && host.endsWith(rh.slice(1)) && host.split(".").length === rh.split(".").length);
+      if (!hostOk) continue;
+      for (const p of rule.http?.paths ?? []) {
+        const pp: string = p.path ?? "/";
+        let ok = false;
+        if (regex || /[()$^*]/.test(pp)) {
+          try {
+            ok = new RegExp("^" + pp).test(path);
+          } catch {
+            ok = false;
+          }
+        } else if (p.pathType === "Exact") ok = path === pp;
+        else ok = pp === "/" || path === pp || path.startsWith(pp.replace(/\/$/, "") + "/");
+        if (ok) cands.push({ ing, rule, p, score: (rh ? 1000 : 0) + pp.length + (p.pathType === "Exact" ? 500 : 0) });
+      }
+    }
+  }
+  cands.sort((a, b) => b.score - a.score);
+  const hit = cands[0];
+  let backend = hit?.p.backend;
+  let ing = hit?.ing;
+  if (!hit) {
+    const def = cluster.list("Ingress").find((i) => i.spec?.defaultBackend && mine.has(i.spec?.ingressClassName ?? defaultClass ?? ""));
+    if (!def) return notFound();
+    backend = def.spec.defaultBackend;
+    ing = def;
+  }
+  const svcName = backend?.service?.name;
+  const svc = svcName ? cluster.get("Service", svcName, ing!.metadata.namespace) : undefined;
+  if (!svc) return { status: 503, body: nginxErrorPage(503) };
+  const portSpec = backend.service.port ?? {};
+  const sp = (svc.spec.ports ?? []).find((x: { port: number; name?: string }) => (portSpec.number !== undefined ? x.port === portSpec.number : x.name === portSpec.name));
+  if (!sp) return { status: 503, body: nginxErrorPage(503) };
+  let upstreamPath = path;
+  const rewrite = ing!.metadata.annotations?.["nginx.ingress.kubernetes.io/rewrite-target"];
+  if (rewrite && hit) {
+    const pp: string = hit.p.path ?? "/";
+    const m = path.match(new RegExp("^" + (/[()]/.test(pp) ? pp : pp.replace(/[.*+?^${}()|[\]\\]/g, "\\$&") + "(.*)")));
+    upstreamPath = m ? rewrite.replace(/\$(\d)/g, (_: string, n: string) => m[parseInt(n, 10)] ?? "") : rewrite;
+    if (!/[()]/.test(pp) && rewrite === "/") upstreamPath = "/" + (m?.[1] ?? "").replace(/^\//, "");
+    if (!upstreamPath.startsWith("/")) upstreamPath = "/" + upstreamPath;
+  }
+  const { conn } = connect(cluster, controller, svc.metadata.namespace ?? "default", svc.spec.clusterIP, sp.port);
+  if (!conn.ok) return { status: conn.error === "refused" && !cluster.list("Pod", svc.metadata.namespace).some((p) => svc.spec.selector && matchMap(p.metadata.labels, svc.spec.selector) && isReady(p)) ? 503 : 502, body: nginxErrorPage(conn.error === "refused" ? 503 : 504) };
+  const res = serveHttp(cluster, conn.pod, conn.container, conn.cs, conn.server, upstreamPath, { ip: controller.status?.podIP ?? "", agent: client.agent }, hostHeader);
+  return res ?? { status: 502, body: nginxErrorPage(502) };
+}
+
+export function httpRequest(cluster: Cluster, from: KObject | undefined, ns: string, url: string, agent: string, hostHeader?: string): { res?: HttpResponse; error?: string; host: string; port: number; ip?: string } {
   const m = url.match(/^(?:(https?):\/\/)?([^/:]+)(?::(\d+))?(\/.*)?$/);
   if (!m) return { error: "unresolved", host: url, port: 80 };
   const host = m[2];
   const port = m[3] ? parseInt(m[3], 10) : m[1] === "https" ? 443 : 80;
   const path = m[4] ?? "/";
-  if (m[1] === "https") return { error: "tls", host, port };
+  if (m[1] === "https" && !(port === 443 || port === 30443)) return { error: "tls", host, port };
   const { conn, target } = connect(cluster, from, ns, host, port);
   if (!conn.ok) return { error: conn.error, host, port, ip: target?.ip };
-  const res = serveHttp(cluster, conn.pod, conn.container, conn.cs, conn.server, path, { ip: from?.status?.podIP ?? "10.244.0.1", agent }, host);
+  const res = serveHttp(cluster, conn.pod, conn.container, conn.cs, conn.server, path, { ip: from?.status?.podIP ?? "10.244.0.1", agent }, hostHeader ?? host);
   if (!res) return { error: "reset", host, port, ip: target?.ip };
   return { res, host, port, ip: target?.ip };
 }
 
 // ------------------------------------------------------------------ network commands
 
-function wget(cluster: Cluster, from: KObject, ns: string, args: string[]): NetResult {
+function wget(cluster: Cluster, from: KObject | undefined, ns: string, args: string[]): NetResult {
   let quiet = false;
   let toStdout = false;
   let spider = false;
@@ -1026,8 +1132,6 @@ function wget(cluster: Cluster, from: KObject, ns: string, args: string[]): NetR
   if (spider) return { stdout: "", stderr: quiet ? "" : `${connecting}remote file exists\n`, code: 0 };
   if (toStdout) return { stdout: res.body, stderr: quiet ? "" : `${connecting}writing to stdout\n-                    100% |********************************|   ${res.body.length}  0:00:00 ETA\nwritten to stdout\n`, code: 0 };
   const name = outFile ?? (url.split("?")[0].replace(/\/$/, "").split("/").length > 3 ? url.split("/").pop() || "index.html" : "index.html");
-  const c = cluster.podSims.get(from.metadata.uid!);
-  void c;
   return { stdout: "", stderr: quiet ? "" : `${connecting}saving to '${name}'\n${name.padEnd(20)} 100% |********************************|   ${res.body.length}  0:00:00 ETA\n'${name}' saved\n`, code: 0, saveAs: { name, body: res.body } } as NetResult;
 }
 
@@ -1049,7 +1153,7 @@ function curlApi(cluster: Cluster, url: string, headers: string[], insecure: boo
   return { stdout: (head ? hdr : include ? hdr + res.body : res.body) + wo(String(res.status)), stderr: "", code: 0 };
 }
 
-function curl(cluster: Cluster, from: KObject, ns: string, args: string[], fs?: Fs): NetResult {
+function curl(cluster: Cluster, from: KObject | undefined, ns: string, args: string[], fs?: Fs): NetResult {
   let head = false;
   const headers: string[] = [];
   let insecure = false;
@@ -1084,7 +1188,14 @@ function curl(cluster: Cluster, from: KObject, ns: string, args: string[], fs?: 
   const wo = (code: string) => (writeOut ? writeOut.replace("%{http_code}", code).replace(/\\n/g, "\n") : "");
   const um = url.match(/^https:\/\/([^/:]+)(?::(\d+))?/);
   if (um && isApiServer(cluster, ns, um[1], um[2] ? parseInt(um[2], 10) : 443)) return curlApi(cluster, url, headers, insecure, cacert, fs, wo, head, include);
-  const r = httpRequest(cluster, from, ns, url, "curl/8.17.0");
+  const hostHeader = headers.find((h) => /^host:/i.test(h))?.replace(/^host:\s*/i, "");
+  const resolveArg = args[args.indexOf("--resolve") + 1];
+  let target = url;
+  if (args.includes("--resolve") && resolveArg) {
+    const [rh, rp, rip] = resolveArg.split(":");
+    target = url.replace(new RegExp(`//${rh}(:${rp})?`), `//${rip}:${rp}`);
+  }
+  const r = httpRequest(cluster, from, ns, target, "curl/8.17.0", hostHeader ?? (target !== url ? url.match(/\/\/([^/:]+)/)?.[1] : undefined));
   if (r.error) {
     const msg =
       r.error === "unresolved"
@@ -1108,9 +1219,10 @@ function curl(cluster: Cluster, from: KObject, ns: string, args: string[], fs?: 
   return { stdout: out + wo(String(res.status)), stderr: "", code: 0 };
 }
 
-function nslookup(cluster: Cluster, ns: string, args: string[], cmd: string): NetResult {
+function nslookup(cluster: Cluster, ns: string, args: string[], cmd: string, from?: KObject): NetResult {
   const name = args.filter((a) => !a.startsWith("-") && !a.startsWith("+"))[0];
   if (!name) return { stdout: "", stderr: "Usage: nslookup [-type=QUERY_TYPE] [-debug] HOST [DNS_SERVER]\n", code: 1 };
+  if (!dnsCheck(cluster, from)) return { stdout: ";; connection timed out; no servers could be reached\n\n", stderr: "", code: 1 };
   const header = "Server:\t\t10.96.0.10\nAddress:\t10.96.0.10:53\n\n";
   const t = resolveHost(cluster, ns, name);
   const fq = name.includes(".") ? name : `${name}.${ns}.svc.cluster.local`;
@@ -1182,7 +1294,7 @@ export function netCommand(cluster: Cluster, pod: KObject, cmd: string, args: st
     case "nslookup":
     case "host":
     case "dig":
-      return nslookup(cluster, ns, args, cmd);
+      return nslookup(cluster, ns, args, cmd, pod);
     case "nc":
     case "telnet":
       return nc(cluster, pod, ns, args, stdin);
@@ -1191,6 +1303,11 @@ export function netCommand(cluster: Cluster, pod: KObject, cmd: string, args: st
     default:
       return { stdout: "", stderr: `${cmd}: not simulated\n`, code: 1 };
   }
+}
+
+/** curl and wget run on the simulator host (a node): NodePorts, pod and Service IPs, port-forwards. */
+export function hostNet(cluster: Cluster, cmd: "curl" | "wget", args: string[]): NetResult {
+  return cmd === "curl" ? curl(cluster, undefined, "default", args) : wget(cluster, undefined, "default", args);
 }
 
 export function nginxListenPorts(cluster: Cluster, pod: KObject, c: ContainerSpec, cs: ContainerSim): number[] {

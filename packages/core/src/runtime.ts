@@ -32,7 +32,8 @@ export type Server =
   | { kind: "static"; root: string; style: "busybox" | "python" }
   | { kind: "text"; body: string }
   | { kind: "whoami" }
-  | { kind: "tcp"; name: string };
+  | { kind: "tcp"; name: string }
+  | { kind: "ingress" };
 
 export interface Host {
   /** Absolute virtual time, used only for exec mode. Processes use their own cursor. */
@@ -225,7 +226,7 @@ export function execNow(host: Host, argv: string[] | { script: string }, opts: {
 
 const SHELL_BUILTINS = new Set([
   ":", "true", "false", "echo", "printf", "exit", "return", "break", "continue", "export", "local", "readonly", "unset", "set", "shift",
-  "trap", "cd", "pwd", "ulimit", "umask", "wait", "read", "test", "[", "[[", "sh", "bash", "ash", "exec", "eval", ".", "source", "type", "command", "let", "times", "alias",
+  "trap", "cd", "pwd", "ulimit", "umask", "wait", "read", "test", "[", "[[", "sh", "bash", "ash", "exec", "eval", ".", "source", "type", "command", "let", "times", "alias", "__serve",
 ]);
 
 export class Exec {
@@ -1724,11 +1725,12 @@ const BUILTINS: Record<string, Builtin> = {
   /** Internal: start one of the built-in image servers. __serve KIND PORT [TEXT] */
   __serve: function* (x, args, io) {
     const [kind, portText, ...rest] = args;
-    const port = parseInt(portText ?? "80", 10);
     const server: Server =
-      kind === "nginx" ? { kind: "nginx" } : kind === "whoami" ? { kind: "whoami" } : kind === "text" ? { kind: "text", body: rest.join(" ") } : kind === "static" ? { kind: "static", root: rest[0] ?? "/", style: "busybox" } : { kind: "tcp", name: rest[0] ?? kind };
-    const e = serveCommand(x, port, server, io, rest[0] ?? kind);
-    if (e !== undefined) return e;
+      kind === "nginx" ? { kind: "nginx" } : kind === "whoami" ? { kind: "whoami" } : kind === "ingress" ? { kind: "ingress" } : kind === "text" ? { kind: "text", body: rest.join(" ") } : kind === "static" ? { kind: "static", root: rest[0] ?? "/", style: "busybox" } : { kind: "tcp", name: rest[0] ?? kind };
+    for (const port of (portText ?? "80").split(",").map((n) => parseInt(n, 10))) {
+      const e = serveCommand(x, port, server, io, rest[0] ?? kind);
+      if (e !== undefined) return e;
+    }
     yield { block: kind };
     return 0;
   },

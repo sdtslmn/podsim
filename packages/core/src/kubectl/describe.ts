@@ -518,6 +518,93 @@ function describeStatefulSet(cluster: Cluster, s: KObject): string {
   return w.render();
 }
 
+function describeIngress(cluster: Cluster, ing: KObject): string {
+  const w = new Writer();
+  const ns = ing.metadata.namespace ?? "default";
+  const backendText = (b: Record<string, any> | undefined) => {
+    if (!b?.service) return "<default>";
+    const port = b.service.port?.number ?? b.service.port?.name;
+    const svc = cluster.get("Service", b.service.name, ns);
+    const ep = cluster.get("Endpoints", b.service.name, ns);
+    const ips = (((ep?.subsets ?? []) as { addresses?: { ip: string }[]; ports?: { port: number }[] }[]).flatMap((s) => (s.addresses ?? []).map((a) => `${a.ip}:${s.ports?.[0]?.port ?? port}`)));
+    const tail = !svc ? `(<error: services "${b.service.name}" not found>)` : ips.length ? `(${ips.join(",")})` : "()";
+    return `${b.service.name}:${port} ${tail}`;
+  };
+  w.kv(0, "Name", ing.metadata.name);
+  w.kv(0, "Labels", labelsBlock(ing.metadata.labels));
+  w.kv(0, "Namespace", ns);
+  w.kv(0, "Address", ((ing.status?.loadBalancer?.ingress ?? []) as { ip?: string }[]).map((x) => x.ip).join(","));
+  w.kv(0, "Ingress Class", ing.spec?.ingressClassName ?? "<none>");
+  w.kv(0, "Default backend", backendText(ing.spec?.defaultBackend));
+  if (ing.spec?.tls?.length) {
+    w.head(0, "TLS:");
+    for (const t of ing.spec.tls) w.head(2, `${t.secretName ?? "SNI"} terminates ${(t.hosts ?? []).join(",")}`);
+  }
+  w.head(0, "Rules:");
+  const rows: string[][] = [];
+  for (const r of (ing.spec?.rules ?? []) as Record<string, any>[]) {
+    rows.push([r.host ?? "*", "", ""]);
+    for (const p of r.http?.paths ?? []) rows.push(["", p.path ?? "/", backendText(p.backend)]);
+  }
+  w.table(2, ["Host", "Path", "Backends"], rows);
+  w.kv(0, "Annotations", annotationsBlock(ing.metadata.annotations));
+  eventsSection(cluster, w, ing);
+  return w.render();
+}
+
+function peerLines(w: Writer, peers: Record<string, any>[] | undefined, label: string, indent: number): void {
+  if (!peers || peers.length === 0) {
+    w.kv(indent, label, `<any> (traffic not restricted by ${label === "From" ? "source" : "destination"})`);
+    return;
+  }
+  for (const p of peers) {
+    w.head(indent, `${label}:`);
+    if (p.ipBlock) {
+      w.head(indent + 2, "IPBlock:");
+      w.kv(indent + 4, "CIDR", p.ipBlock.cidr);
+      w.kv(indent + 4, "Except", (p.ipBlock.except ?? []).join(", "));
+    }
+    if (p.namespaceSelector) w.kv(indent + 2, "NamespaceSelector", selectorText(p.namespaceSelector) || "<none>");
+    if (p.podSelector) w.kv(indent + 2, "PodSelector", selectorText(p.podSelector) || "<none>");
+  }
+}
+
+function describeNetworkPolicy(cluster: Cluster, np: KObject): string {
+  const w = new Writer();
+  w.kv(0, "Name", np.metadata.name);
+  w.kv(0, "Namespace", np.metadata.namespace);
+  w.kv(0, "Created on", (np.metadata.creationTimestamp ?? "").replace("T", " ").replace("Z", " +0000 UTC"));
+  w.kv(0, "Labels", labelsBlock(np.metadata.labels));
+  w.kv(0, "Annotations", annotationsBlock(np.metadata.annotations));
+  w.head(0, "Spec:");
+  const sel = selectorText(np.spec?.podSelector);
+  w.kv(2, "PodSelector", sel ? sel : "<none> (Allowing the specific traffic to all pods in this namespace)");
+  const types: string[] = np.spec?.policyTypes?.length ? np.spec.policyTypes : np.spec?.egress ? ["Ingress", "Egress"] : ["Ingress"];
+  const rulesBlock = (rules: Record<string, any>[] | undefined, dir: "ingress" | "egress") => {
+    if (!types.includes(dir === "ingress" ? "Ingress" : "Egress")) {
+      w.head(2, `Not affecting ${dir} traffic`);
+      return;
+    }
+    if (!rules || rules.length === 0) {
+      w.head(2, `Allowing ${dir} traffic:`);
+      w.head(4, `<none> (Selected pods are isolated for ${dir} connectivity)`);
+      return;
+    }
+    w.head(2, `Allowing ${dir} traffic:`);
+    rules.forEach((r, i) => {
+      if (i > 0) w.head(4, "----------");
+      const ports = (r.ports ?? []) as { port?: number | string; protocol?: string; endPort?: number }[];
+      if (ports.length) for (const p of ports) w.kv(4, "To Port", `${p.port ?? "<any>"}${p.endPort ? `-${p.endPort}` : ""}/${p.protocol ?? "TCP"}`);
+      else w.kv(4, "To Port", "<any> (traffic allowed to all ports)");
+      peerLines(w, dir === "ingress" ? r.from : r.to, dir === "ingress" ? "From" : "To", 4);
+    });
+  };
+  rulesBlock(np.spec?.ingress, "ingress");
+  rulesBlock(np.spec?.egress, "egress");
+  w.kv(2, "Policy Types", types.join(", "));
+  return w.render();
+}
+
 function describeService(cluster: Cluster, svc: KObject): string {
   const w = new Writer();
   const spec = svc.spec ?? {};
@@ -871,6 +958,10 @@ export function describe(cluster: Cluster, obj: KObject): string {
     case "RoleBinding":
     case "ClusterRoleBinding":
       return describeBinding(cluster, obj);
+    case "Ingress":
+      return describeIngress(cluster, obj);
+    case "NetworkPolicy":
+      return describeNetworkPolicy(cluster, obj);
     case "ResourceQuota":
       return describeQuota(cluster, obj);
     case "LimitRange":

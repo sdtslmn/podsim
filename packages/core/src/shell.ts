@@ -5,7 +5,7 @@
 
 import type { FileSystem } from "./fs.js";
 import type { Cluster } from "./cluster.js";
-import { execInContainer, identityFor } from "./podruntime.js";
+import { execInContainer, identityFor, hostNet } from "./podruntime.js";
 import { parseImage } from "./images.js";
 import { Kubectl, type IO } from "./kubectl/index.js";
 import { toBase64, fromBase64 } from "./cluster.js";
@@ -233,7 +233,54 @@ export class Shell {
     return tokens;
   }
 
+  /** Replace $(...) and `...` (outside single quotes) with the command's output. */
+  private async substitute(line: string, io: IO): Promise<string> {
+    let out = "";
+    let quote: string | null = null;
+    for (let i = 0; i < line.length; i++) {
+      const c = line[i];
+      if (quote === "'") {
+        if (c === "'") quote = null;
+        out += c;
+        continue;
+      }
+      if (c === "'" && !quote) {
+        quote = "'";
+        out += c;
+        continue;
+      }
+      if (c === '"') quote = quote === '"' ? null : '"';
+      let inner: string | undefined;
+      if (c === "$" && line[i + 1] === "(" && line[i + 2] !== "(") {
+        let depth = 0;
+        let j = i + 1;
+        for (; j < line.length; j++) {
+          if (line[j] === "(") depth++;
+          else if (line[j] === ")" && --depth === 0) break;
+        }
+        inner = line.slice(i + 2, j);
+        i = j;
+      } else if (c === "`") {
+        const j = line.indexOf("`", i + 1);
+        if (j > i) {
+          inner = line.slice(i + 1, j);
+          i = j;
+        }
+      }
+      if (inner === undefined) {
+        out += c;
+        continue;
+      }
+      let captured = "";
+      await this.exec(inner, { ...io, stdout: (t) => (captured += t) });
+      captured = captured.replace(/\n+$/, "");
+      out += quote ? captured : captured.replace(/\s+/g, " ");
+    }
+    return out;
+  }
+
   private async runLine(line: string, io: IO, heredoc?: string): Promise<number> {
+    if (/\$\((?!\()|`/.test(line)) line = await this.substitute(line, io);
     const tokens = this.tokenize(line);
     // Split into command lists by ; && ||
     const lists: { tokens: Token[]; op?: string }[] = [];
@@ -685,10 +732,16 @@ export class Shell {
       case "etcdctl":
       case "kubeadm":
       case "ssh":
-      case "curl":
-      case "wget":
-        io.stderr(`(podsim) ${cmd} is not available on the simulator host yet. ${cmd === "curl" || cmd === "wget" ? "Run it inside a pod instead, e.g. kubectl exec POD -- wget -qO- http://SERVICE" : "It is on the roadmap."}\n`);
+        io.stderr(`(podsim) ${cmd} is not available on the simulator host yet. It is on the roadmap.\n`);
         return 127;
+      case "curl":
+      case "wget": {
+        this.cluster.advance();
+        const r = hostNet(this.cluster, cmd, args);
+        if (r.stdout) out(r.stdout);
+        if (r.stderr) io.stderr(r.stderr);
+        return r.code;
+      }
       default:
         if (NOOP_COMMANDS.has(cmd)) return 0;
         io.stderr(`podsim: ${cmd}: command not found\n`);

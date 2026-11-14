@@ -438,6 +438,34 @@ export function cmdExplain(ctx: Ctx, f: Flags): number {
   return 1;
 }
 
+export async function cmdPortForward(ctx: Ctx, f: Flags): Promise<number> {
+  const { cluster } = ctx;
+  cluster.advance();
+  const ns = nsOf(ctx, f);
+  const [target, ...specs] = f.args;
+  if (!target || specs.length === 0) throw new KubeError("error: TYPE/NAME and list of ports are required for port-forward\nSee 'kubectl port-forward -h' for help and examples");
+  const pod = podFor(ctx, target, ns, "port-forward to");
+  if (pod.status?.phase !== "Running") throw new KubeError(`error: unable to forward port because pod is not running. Current status=${pod.status?.phase ?? "Pending"}`);
+  const svc = target.split("/")[0].startsWith("svc") || target.split("/")[0].startsWith("service") ? cluster.get("Service", target.split("/")[1], ns) : undefined;
+  const fwds = (cluster.scratch.get("portforwards") as Record<number, { pod: string; ns: string; port: number }> | undefined) ?? {};
+  for (const spec of specs) {
+    const [localText, remoteText] = spec.includes(":") ? spec.split(":") : [spec, spec];
+    const local = parseInt(localText || remoteText, 10);
+    let remote = parseInt(remoteText, 10);
+    if (svc) {
+      const sp = (svc.spec.ports ?? []).find((p: { port: number }) => p.port === remote);
+      if (!sp) throw new KubeError(`error: Service ${svc.metadata.name} does not have a service port ${remote}`);
+      remote = typeof sp.targetPort === "number" ? sp.targetPort : parseInt(String(sp.targetPort), 10) || remote;
+    }
+    if (fwds[local]) throw new KubeError(`Unable to listen on port ${local}: Listeners failed to create with the following errors: [unable to create listener: Error listen tcp4 127.0.0.1:${local}: bind: address already in use]\nerror: unable to listen on any of the requested ports: [{${local} ${remote}}]`);
+    fwds[local] = { pod: pod.metadata.name, ns, port: remote };
+    out(ctx, `Forwarding from 127.0.0.1:${local} -> ${remote}\nForwarding from [::1]:${local} -> ${remote}`);
+  }
+  cluster.scratch.set("portforwards", fwds);
+  err(ctx, "(podsim) the port-forward keeps running in the background. Try: curl localhost:" + (specs[0].split(":")[0] || specs[0]));
+  return 0;
+}
+
 export function notSimulated(ctx: Ctx, cmd: string): number {
   err(ctx, `(podsim) "kubectl ${cmd}" is not simulated yet.`);
   return 1;

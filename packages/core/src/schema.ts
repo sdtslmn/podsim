@@ -142,6 +142,11 @@ const ServicePort = obj("ServicePort", { name: S, protocol: S, appProtocol: S, p
 
 const top = (kind: string, fields: Record<string, T>) => obj(kind, { apiVersion: S, kind: S, metadata: ObjectMeta, ...fields });
 
+const LabelSelector = obj("LabelSelector", { matchLabels: SMAP, matchExpressions: arr(obj("LabelSelectorRequirement", { key: S, operator: S, values: arr(S) })) });
+const NPPeer = obj("NetworkPolicyPeer", { podSelector: LabelSelector, namespaceSelector: LabelSelector, ipBlock: obj("IPBlock", { cidr: S, except: arr(S) }) });
+const NPPort = obj("NetworkPolicyPort", { protocol: S, port: IS, endPort: I });
+const IngressBackend = obj("IngressBackend", { service: obj("IngressServiceBackend", { name: S, port: obj("ServiceBackendPort", { name: S, number: I }) }), resource: A });
+
 const JobSpec = obj("JobSpec", {
   parallelism: I,
   completions: I,
@@ -249,6 +254,24 @@ const SCHEMAS: Record<string, T> = {
     status: A,
   }),
   PersistentVolumeClaim: top("PersistentVolumeClaim", { spec: PVCSpec, status: A }),
+  NetworkPolicy: top("NetworkPolicy", {
+    spec: obj("NetworkPolicySpec", {
+      podSelector: LabelSelector,
+      ingress: arr(obj("NetworkPolicyIngressRule", { from: arr(NPPeer), ports: arr(NPPort) })),
+      egress: arr(obj("NetworkPolicyEgressRule", { to: arr(NPPeer), ports: arr(NPPort) })),
+      policyTypes: arr(S),
+    }),
+    status: A,
+  }),
+  Ingress: top("Ingress", {
+    spec: obj("IngressSpec", {
+      ingressClassName: S,
+      defaultBackend: IngressBackend,
+      tls: arr(obj("IngressTLS", { hosts: arr(S), secretName: S })),
+      rules: arr(obj("IngressRule", { host: S, http: obj("HTTPIngressRuleValue", { paths: arr(obj("HTTPIngressPath", { path: S, pathType: S, backend: IngressBackend })) }) })),
+    }),
+    status: A,
+  }),
   ConfigMap: top("ConfigMap", { data: SMAP, binaryData: AMAP, immutable: B }),
   Secret: top("Secret", { data: SMAP, stringData: SMAP, type: S, immutable: B }),
   Namespace: top("Namespace", { spec: A, status: A }),

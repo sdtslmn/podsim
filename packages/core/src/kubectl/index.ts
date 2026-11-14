@@ -24,6 +24,7 @@ import {
   cmdTop,
   cmdExplain,
   cmdEdit,
+  cmdPortForward,
   notSimulated,
 } from "./ops.js";
 
@@ -185,6 +186,7 @@ export class Kubectl {
       case "completion":
         return 0;
       case "port-forward":
+        return cmdPortForward(ctx, f);
       case "proxy":
       case "cp":
       case "attach":

@@ -18,6 +18,7 @@ import { defaultPullPolicy } from "./images.js";
 import { runControllers, type PodSim } from "./controllers/index.js";
 import { parseSchedule } from "./cron.js";
 import { admitPod, admitObject, templateWarnings } from "./admission.js";
+import "./netpol.js";
 
 export interface ClusterOptions {
   /** Wall clock in ms. Defaults to Date.now. Tests pass a fake clock. */
@@ -399,6 +400,26 @@ export class Cluster {
       }
       case "Job":
         validateJobSpec("Job", name, obj.spec, "spec");
+        break;
+      case "Ingress": {
+        const rules = (obj.spec?.rules ?? []) as Record<string, any>[];
+        if (!rules.length && !obj.spec?.defaultBackend) throw invalid("Ingress", name, "spec: Invalid value: field must be specified: either `defaultBackend` or `rules` must be specified");
+        rules.forEach((r, i) => {
+          (r.http?.paths ?? []).forEach((p: Record<string, any>, j: number) => {
+            const base = `spec.rules[${i}].http.paths[${j}]`;
+            if (!p.pathType) throw invalid("Ingress", name, `${base}.pathType: Required value: pathType must be specified`);
+            if (!["Exact", "Prefix", "ImplementationSpecific"].includes(p.pathType)) throw invalid("Ingress", name, `${base}.pathType: Unsupported value: "${p.pathType}": supported values: "Exact", "ImplementationSpecific", "Prefix"`);
+            if (p.pathType !== "ImplementationSpecific" && !String(p.path ?? "").startsWith("/")) throw invalid("Ingress", name, `${base}.path: Invalid value: "${p.path ?? ""}": must be an absolute path`);
+            if (!p.backend?.service?.name && !p.backend?.resource) throw invalid("Ingress", name, `${base}.backend: Invalid value: "": resource or service backend is required`);
+            const port = p.backend?.service?.port;
+            if (p.backend?.service && (!port || (port.number === undefined && port.name === undefined))) throw invalid("Ingress", name, `${base}.backend.service.port: Invalid value: "": port name or number is required`);
+          });
+          if (r.host && /^\d+\.\d+\.\d+\.\d+$/.test(r.host)) throw invalid("Ingress", name, `spec.rules[${i}].host: Invalid value: "${r.host}": must be a DNS name, not an IP address`);
+        });
+        break;
+      }
+      case "NetworkPolicy":
+        if (obj.spec?.podSelector === undefined) throw invalid("NetworkPolicy", name, "spec.podSelector: Required value");
         break;
       case "CronJob": {
         const spec = obj.spec;
@@ -860,6 +881,52 @@ export class Cluster {
       subjects: [{ apiGroup: "rbac.authorization.k8s.io", kind: "Group", name: "system:masters" }],
     });
 
+    // The ingress-nginx controller, reachable on every node at NodePort 30080 (http) and 30443 (https).
+    mk({ apiVersion: "v1", kind: "Namespace", metadata: { name: "ingress-nginx", labels: { "kubernetes.io/metadata.name": "ingress-nginx", "app.kubernetes.io/name": "ingress-nginx" } }, spec: { finalizers: ["kubernetes"] }, status: { phase: "Active" } });
+    mk({
+      apiVersion: "networking.k8s.io/v1",
+      kind: "IngressClass",
+      metadata: { name: "nginx", labels: { "app.kubernetes.io/name": "ingress-nginx", "app.kubernetes.io/component": "controller" }, annotations: { "ingressclass.kubernetes.io/is-default-class": "true" } },
+      spec: { controller: "k8s.io/ingress-nginx" },
+    });
+    const ingLabels = { "app.kubernetes.io/name": "ingress-nginx", "app.kubernetes.io/instance": "ingress-nginx", "app.kubernetes.io/component": "controller" };
+    this.create({
+      apiVersion: "apps/v1",
+      kind: "Deployment",
+      metadata: { name: "ingress-nginx-controller", namespace: "ingress-nginx", labels: { ...ingLabels } },
+      spec: {
+        replicas: 1,
+        selector: { matchLabels: { ...ingLabels } },
+        template: {
+          metadata: { labels: { ...ingLabels } },
+          spec: {
+            containers: [
+              {
+                name: "controller",
+                image: "registry.k8s.io/ingress-nginx/controller:v1.14.0",
+                ports: [{ name: "http", containerPort: 80 }, { name: "https", containerPort: 443 }],
+                securityContext: { runAsUser: 101, runAsNonRoot: true, allowPrivilegeEscalation: false, capabilities: { add: ["NET_BIND_SERVICE"], drop: ["ALL"] } },
+              },
+            ],
+            nodeSelector: { "kubernetes.io/os": "linux" },
+          },
+        },
+      },
+    }).metadata.creationTimestamp = created;
+    this.create({
+      apiVersion: "v1",
+      kind: "Service",
+      metadata: { name: "ingress-nginx-controller", namespace: "ingress-nginx", labels: { ...ingLabels } },
+      spec: {
+        type: "NodePort",
+        selector: { ...ingLabels },
+        ports: [
+          { name: "http", port: 80, targetPort: "http", nodePort: 30080, protocol: "TCP", appProtocol: "http" },
+          { name: "https", port: 443, targetPort: "https", nodePort: 30443, protocol: "TCP", appProtocol: "https" },
+        ],
+      },
+    }).metadata.creationTimestamp = created;
+
     mk({
       apiVersion: "storage.k8s.io/v1",
       kind: "StorageClass",
@@ -873,7 +940,7 @@ export class Cluster {
     this.lastT = start;
     this.advance();
     for (const o of this.objects.values()) {
-      if (o.metadata.namespace === "kube-system" && parseTimeSafe(o.metadata.creationTimestamp) > start) {
+      if ((o.metadata.namespace === "kube-system" || o.metadata.namespace === "ingress-nginx") && parseTimeSafe(o.metadata.creationTimestamp) > start) {
         o.metadata.creationTimestamp = created;
       }
     }

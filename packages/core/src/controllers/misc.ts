@@ -149,3 +149,27 @@ export function reconcileQuotas(cluster: Cluster): void {
     }
   }
 }
+
+/** ingress-nginx publishes its node address on Ingresses of its class. */
+export function reconcileIngresses(cluster: Cluster, t: number): void {
+  const classes = cluster.list("IngressClass").filter((c) => c.spec?.controller === "k8s.io/ingress-nginx");
+  const def = classes.find((c) => c.metadata.annotations?.["ingressclass.kubernetes.io/is-default-class"] === "true")?.metadata.name;
+  const controller = cluster.list("Pod", "ingress-nginx").find((p) => p.metadata.labels?.["app.kubernetes.io/component"] === "controller" && p.status?.phase === "Running");
+  const nodeIp = controller ? cluster.get("Node", controller.spec.nodeName)?.status?.addresses?.find((a: { type: string }) => a.type === "InternalIP")?.address : undefined;
+  for (const ing of cluster.list("Ingress")) {
+    const cls = ing.spec?.ingressClassName ?? ing.metadata.annotations?.["kubernetes.io/ingress.class"] ?? def;
+    const ours = !!cls && classes.some((c) => c.metadata.name === cls);
+    const seenKey = `ing-sync/${ing.metadata.uid}/${ing.metadata.resourceVersion === undefined ? "" : ing.metadata.generation ?? ""}`;
+    if (ours && controller && !cluster.scratch.get(seenKey)) {
+      cluster.scratch.set(seenKey, true);
+      cluster.recordEvent(ing, "Normal", "Sync", "Scheduled for sync", { component: "nginx-ingress-controller", host: controller.metadata.name }, t);
+    }
+    const want = ours && nodeIp ? { loadBalancer: { ingress: [{ ip: nodeIp }] } } : { loadBalancer: {} };
+    const created = Date.parse(String(ing.metadata.creationTimestamp ?? "")) || t;
+    if (ours && t - created < 8000) continue;
+    if (JSON.stringify(ing.status ?? {}) !== JSON.stringify(want)) {
+      ing.status = want;
+      cluster.put(ing);
+    }
+  }
+}

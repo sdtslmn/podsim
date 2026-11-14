@@ -277,7 +277,7 @@ function columnsFor(cluster: Cluster, kind: string): Columns {
           i.metadata.name,
           i.spec?.ingressClassName ?? "<none>",
           ((i.spec?.rules ?? []) as { host?: string }[]).map((r) => r.host ?? "*").join(",") || "*",
-          "",
+          ((i.status?.loadBalancer?.ingress ?? []) as { ip?: string; hostname?: string }[]).map((x) => x.ip ?? x.hostname).join(","),
           i.spec?.tls ? "80, 443" : "80",
           age(cluster, i.metadata.creationTimestamp),
         ],

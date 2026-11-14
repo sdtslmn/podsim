@@ -6,7 +6,7 @@ import { KINDS } from "../kinds.js";
 import { K8S_VERSION } from "../cluster.js";
 import { deepClone, matchMap, table, parseSelector, matchRequirements } from "../util.js";
 import { containerLogs } from "../controllers/kubelet.js";
-import { isPodReady, deploymentPods } from "../controllers/deployment.js";
+import { isPodReady, deploymentPods, ownedBy } from "../controllers/deployment.js";
 import type { Flags } from "./flags.js";
 import { type Ctx, out, err, nsOf, notFoundError, singleTarget, kindOrThrow, ref, parseTargets } from "./common.js";
 import { runInContainer } from "./container.js";
@@ -25,8 +25,10 @@ function podFor(ctx: Ctx, arg: string, ns: string, purpose: string): KObject {
     let pods: KObject[] = [];
     if (info.kind === "Deployment" || info.kind === "ReplicaSet") pods = deploymentPods(cluster, obj);
     else if (info.kind === "Service") pods = cluster.list("Pod", ns).filter((p) => matchMap(p.metadata.labels, obj.spec?.selector));
+    else if (["Job", "DaemonSet", "StatefulSet"].includes(info.kind)) pods = cluster.list("Pod", ns).filter((p) => ownedBy(p, obj));
     else throw new KubeError(`error: cannot ${purpose} ${info.plural}`);
-    pods = pods.filter((p) => p.status?.phase !== "Succeeded" && p.status?.phase !== "Failed");
+    const running = pods.filter((p) => p.status?.phase !== "Succeeded" && p.status?.phase !== "Failed");
+    pods = purpose === "logs" && running.length === 0 ? pods : running;
     if (pods.length === 0) throw new KubeError(`error: timed out waiting for the condition`);
     pods.sort((a, b) => Number(isPodReady(b)) - Number(isPodReady(a)) || a.metadata.name.localeCompare(b.metadata.name));
     if (pods.length > 1 && purpose === "logs") err(ctx, `Found ${pods.length} pods, using pod/${pods[0].metadata.name}`);
@@ -39,13 +41,16 @@ function podFor(ctx: Ctx, arg: string, ns: string, purpose: string): KObject {
 
 function pickContainer(ctx: Ctx, pod: KObject, name: string | undefined): ContainerSpec {
   const cs = pod.spec.containers as ContainerSpec[];
+  const inits = (pod.spec.initContainers ?? []) as ContainerSpec[];
   if (name) {
-    const c = cs.find((x) => x.name === name);
+    const c = cs.find((x) => x.name === name) ?? inits.find((x) => x.name === name);
     if (!c) throw new KubeError(`error: container ${name} is not valid for pod ${pod.metadata.name}`);
     return c;
   }
-  if (cs.length > 1) err(ctx, `Defaulted container "${cs[0].name}" out of: ${cs.map((c) => c.name).join(", ")}`);
-  return cs[0];
+  const def = pod.metadata.annotations?.["kubectl.kubernetes.io/default-container"];
+  const chosen = (def && cs.find((x) => x.name === def)) || cs[0];
+  if (cs.length + inits.length > 1 && !def) err(ctx, `Defaulted container "${chosen.name}" out of: ${[...cs.map((c) => c.name), ...inits.map((c) => `${c.name} (init)`)].join(", ")}`);
+  return chosen;
 }
 
 // ------------------------------------------------------------------ logs
@@ -111,10 +116,25 @@ export async function cmdExec(ctx: Ctx, f: Flags): Promise<number> {
   }
   const pod = podFor(ctx, f.args[0], ns, "exec into");
   const c = pickContainer(ctx, pod, f.str("container"));
-  const st = (pod.status?.containerStatuses ?? []).find((s: { name: string }) => s.name === c.name);
+  const st = [...(pod.status?.containerStatuses ?? []), ...(pod.status?.initContainerStatuses ?? [])].find((s: { name: string }) => s.name === c.name);
   if (!st?.state?.running) {
     if (pod.status?.phase === "Succeeded" || pod.status?.phase === "Failed") throw new KubeError(`error: cannot exec into a container in a completed pod; current phase is ${pod.status.phase}`);
     throw new KubeError(`error: unable to upgrade connection: container not found ("${c.name}")`);
+  }
+  const interactive = f.bool("i") || f.bool("stdin") || f.bool("it") || f.bool("t") || f.bool("tty") || f.bool("ti");
+  const shellOnly = f.rest.length === 1 && /^(\/bin\/|\/usr\/bin\/)?(sh|bash|ash)$/.test(f.rest[0]);
+  if (shellOnly) {
+    if (!interactive) {
+      err(ctx, "(podsim) the shell exited right away because there is no terminal attached. Add -it for an interactive shell: kubectl exec -it POD -- sh");
+      return 0;
+    }
+    const r0 = runInContainer(cluster, pod, c, ["sh", "-c", "true"]);
+    if (r0.exitCode === 127 || (f.rest[0].endsWith("bash") && runInContainer(cluster, pod, c, ["command", "-v", "bash"]).exitCode !== 0)) {
+      err(ctx, `error: Internal error occurred: Internal error occurred: error executing command in container: failed to exec in container: failed to start exec "simulated": OCI runtime exec failed: exec failed: unable to start container process: exec: "${f.rest[0]}": executable file not found in $PATH: unknown`);
+      return 1;
+    }
+    ctx.state.session = { pod: pod.metadata.name, namespace: pod.metadata.namespace ?? ns, container: c.name, remove: false, vars: { PWD: "/" }, bash: f.rest[0].endsWith("bash") };
+    return 0;
   }
   const r = runInContainer(cluster, pod, c, f.rest);
   if (r.stdout) ctx.io.stdout(r.stdout);

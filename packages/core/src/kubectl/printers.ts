@@ -23,33 +23,60 @@ function age(cluster: Cluster, iso: string | undefined): string {
   return humanDuration(cluster.now() - parseTime(iso));
 }
 
+type CStatus = { name?: string; state?: { waiting?: { reason?: string }; terminated?: { reason?: string; exitCode?: number; signal?: number }; running?: unknown }; ready?: boolean; started?: boolean; restartCount?: number; lastState?: { terminated?: { finishedAt?: string } } };
+
+function isSidecar(pod: KObject, name: string | undefined): boolean {
+  return (pod.spec?.initContainers ?? []).some((c: { name: string; restartPolicy?: string }) => c.name === name && c.restartPolicy === "Always");
+}
+
 /** The STATUS column for pods, following kubectl's printPod logic. */
 export function podStatus(pod: KObject): string {
   let reason: string = pod.status?.reason ?? pod.status?.phase ?? "Unknown";
-  let hasRunning = false;
-  const statuses: { state?: { waiting?: { reason?: string }; terminated?: { reason?: string; exitCode?: number; signal?: number } }; ready?: boolean }[] = pod.status?.containerStatuses ?? [];
-  for (let i = statuses.length - 1; i >= 0; i--) {
-    const st = statuses[i].state ?? {};
-    if (st.waiting?.reason) reason = st.waiting.reason;
-    else if (st.terminated?.reason) reason = st.terminated.reason;
-    else if (st.terminated) reason = st.terminated.signal ? `Signal:${st.terminated.signal}` : `ExitCode:${st.terminated.exitCode}`;
-    else if (statuses[i].ready && "running" in st) hasRunning = true;
+  const inits: CStatus[] = pod.status?.initContainerStatuses ?? [];
+  const initCount = (pod.spec?.initContainers ?? []).length;
+  let initializing = false;
+  for (let i = 0; i < inits.length; i++) {
+    const c = inits[i];
+    const st = c.state ?? {};
+    if (st.terminated && st.terminated.exitCode === 0) continue;
+    if (isSidecar(pod, c.name) && c.started) continue;
+    if (st.terminated) {
+      reason = st.terminated.reason ? `Init:${st.terminated.reason}` : st.terminated.signal ? `Init:Signal:${st.terminated.signal}` : `Init:ExitCode:${st.terminated.exitCode}`;
+    } else if (st.waiting?.reason && st.waiting.reason !== "PodInitializing") reason = `Init:${st.waiting.reason}`;
+    else reason = `Init:${i}/${initCount}`;
+    initializing = true;
+    break;
   }
-  if (reason === "Completed" && hasRunning) reason = "Running";
+  const initialized = (pod.status?.conditions ?? []).some((c: { type: string; status: string }) => c.type === "Initialized" && c.status === "True");
+  if (!initializing || initialized) {
+    let hasRunning = false;
+    const statuses: CStatus[] = pod.status?.containerStatuses ?? [];
+    for (let i = statuses.length - 1; i >= 0; i--) {
+      const st = statuses[i].state ?? {};
+      if (st.waiting?.reason) reason = st.waiting.reason;
+      else if (st.terminated?.reason) reason = st.terminated.reason;
+      else if (st.terminated) reason = st.terminated.signal ? `Signal:${st.terminated.signal}` : `ExitCode:${st.terminated.exitCode}`;
+      else if (statuses[i].ready && "running" in st) hasRunning = true;
+    }
+    if (reason === "Completed" && hasRunning) reason = (pod.status?.conditions ?? []).some((c: { type: string; status: string }) => c.type === "Ready" && c.status === "True") ? "Running" : "NotReady";
+  }
   if (pod.metadata.deletionTimestamp) reason = "Terminating";
   return reason;
 }
 
 function podReady(pod: KObject): string {
-  const total = pod.spec?.containers?.length ?? 0;
-  const ready = (pod.status?.containerStatuses ?? []).filter((c: { ready?: boolean }) => c.ready).length;
+  const sidecars = (pod.status?.initContainerStatuses ?? []).filter((c: CStatus) => isSidecar(pod, c.name));
+  const total = (pod.spec?.containers?.length ?? 0) + (pod.spec?.initContainers ?? []).filter((c: { restartPolicy?: string }) => c.restartPolicy === "Always").length;
+  const ready = (pod.status?.containerStatuses ?? []).filter((c: CStatus) => c.ready).length + sidecars.filter((c: CStatus) => c.ready && c.started).length;
   return `${ready}/${total}`;
 }
 
 function podRestarts(cluster: Cluster, pod: KObject): string {
   let restarts = 0;
   let last = 0;
-  for (const c of pod.status?.containerStatuses ?? []) {
+  const initialized = (pod.status?.conditions ?? []).some((c: { type: string; status: string }) => c.type === "Initialized" && c.status === "True");
+  const all: CStatus[] = [...(pod.status?.initContainerStatuses ?? []).filter((c: CStatus) => !initialized || isSidecar(pod, c.name)), ...(pod.status?.containerStatuses ?? [])];
+  for (const c of all) {
     restarts += c.restartCount ?? 0;
     const fin = parseTime(c.lastState?.terminated?.finishedAt);
     if (fin > last) last = fin;
@@ -97,6 +124,34 @@ function selectorString(sel: { matchLabels?: Record<string, string>; matchExpres
     else parts.push(`!${e.key}`);
   }
   return parts.join(",") || "<none>";
+}
+
+function accessModes(modes: string[] | undefined): string {
+  return (modes ?? []).map((m) => ({ ReadWriteOnce: "RWO", ReadOnlyMany: "ROX", ReadWriteMany: "RWX", ReadWriteOncePod: "RWOP" })[m] ?? m).join(",");
+}
+
+export function jobStatus(j: KObject): string {
+  for (const c of j.status?.conditions ?? []) {
+    if (c.status !== "True") continue;
+    if (c.type === "Complete") return "Complete";
+    if (c.type === "Failed") return "Failed";
+    if (c.type === "Suspended") return "Suspended";
+  }
+  for (const c of j.status?.conditions ?? []) if (c.status === "True" && c.type === "FailureTarget") return "FailureTarget";
+  return "Running";
+}
+
+function jobCompletions(j: KObject): string {
+  const done = j.status?.succeeded ?? 0;
+  if (j.spec?.completions !== undefined && j.spec?.completions !== null) return `${done}/${j.spec.completions}`;
+  return `${done}/1 of ${j.spec?.parallelism ?? 1}`;
+}
+
+function jobDuration(cluster: Cluster, j: KObject): string {
+  const start = parseTime(j.status?.startTime);
+  if (!start) return "";
+  const end = parseTime(j.status?.completionTime) || cluster.now();
+  return humanDuration(end - start);
 }
 
 function containersOf(spec: KObject["spec"]): { names: string; images: string } {
@@ -235,12 +290,134 @@ function columnsFor(cluster: Cluster, kind: string): Columns {
           p.status?.phase ?? "Pending",
           p.spec?.volumeName ?? "",
           p.status?.capacity?.storage ?? "",
-          ((p.status?.accessModes ?? []) as string[]).map((m) => ({ ReadWriteOnce: "RWO", ReadOnlyMany: "ROX", ReadWriteMany: "RWX", ReadWriteOncePod: "RWOP" })[m] ?? m).join(","),
+          accessModes(p.status?.accessModes),
           p.spec?.storageClassName ?? "<unset>",
           "<unset>",
           age(cluster, p.metadata.creationTimestamp),
         ],
       };
+    case "Job":
+      return {
+        headers: ["NAME", "STATUS", "COMPLETIONS", "DURATION", "AGE"],
+        wide: ["CONTAINERS", "IMAGES", "SELECTOR"],
+        row: (j) => [j.metadata.name, jobStatus(j), jobCompletions(j), jobDuration(cluster, j), age(cluster, j.metadata.creationTimestamp)],
+        wideRow: (j) => {
+          const c = containersOf(j.spec?.template?.spec);
+          return [c.names, c.images, selectorString(j.spec?.selector)];
+        },
+      };
+    case "CronJob":
+      return {
+        headers: ["NAME", "SCHEDULE", "TIMEZONE", "SUSPEND", "ACTIVE", "LAST SCHEDULE", "AGE"],
+        wide: ["CONTAINERS", "IMAGES", "SELECTOR"],
+        row: (c) => [
+          c.metadata.name,
+          String(c.spec?.schedule ?? ""),
+          c.spec?.timeZone ?? "<none>",
+          c.spec?.suspend ? "True" : "False",
+          String((c.status?.active ?? []).length),
+          c.status?.lastScheduleTime ? age(cluster, c.status.lastScheduleTime) : "<none>",
+          age(cluster, c.metadata.creationTimestamp),
+        ],
+        wideRow: (c) => {
+          const k = containersOf(c.spec?.jobTemplate?.spec?.template?.spec);
+          return [k.names, k.images, selectorString(c.spec?.jobTemplate?.spec?.selector)];
+        },
+      };
+    case "DaemonSet":
+      return {
+        headers: ["NAME", "DESIRED", "CURRENT", "READY", "UP-TO-DATE", "AVAILABLE", "NODE SELECTOR", "AGE"],
+        wide: ["CONTAINERS", "IMAGES", "SELECTOR"],
+        row: (d) => [
+          d.metadata.name,
+          String(d.status?.desiredNumberScheduled ?? 0),
+          String(d.status?.currentNumberScheduled ?? 0),
+          String(d.status?.numberReady ?? 0),
+          String(d.status?.updatedNumberScheduled ?? 0),
+          String(d.status?.numberAvailable ?? 0),
+          d.spec?.template?.spec?.nodeSelector ? formatLabels(d.spec.template.spec.nodeSelector) : "<none>",
+          age(cluster, d.metadata.creationTimestamp),
+        ],
+        wideRow: (d) => {
+          const c = containersOf(d.spec?.template?.spec);
+          return [c.names, c.images, selectorString(d.spec?.selector)];
+        },
+      };
+    case "StatefulSet":
+      return {
+        headers: ["NAME", "READY", "AGE"],
+        wide: ["CONTAINERS", "IMAGES"],
+        row: (s) => [s.metadata.name, `${s.status?.readyReplicas ?? 0}/${s.spec?.replicas ?? 0}`, age(cluster, s.metadata.creationTimestamp)],
+        wideRow: (s) => {
+          const c = containersOf(s.spec?.template?.spec);
+          return [c.names, c.images];
+        },
+      };
+    case "PersistentVolume":
+      return {
+        headers: ["NAME", "CAPACITY", "ACCESS MODES", "RECLAIM POLICY", "STATUS", "CLAIM", "STORAGECLASS", "VOLUMEATTRIBUTESCLASS", "REASON", "AGE"],
+        wide: ["VOLUMEMODE"],
+        row: (v) => [
+          v.metadata.name,
+          v.spec?.capacity?.storage ?? "",
+          accessModes(v.spec?.accessModes),
+          v.spec?.persistentVolumeReclaimPolicy ?? "Retain",
+          v.status?.phase ?? "Pending",
+          v.spec?.claimRef ? `${v.spec.claimRef.namespace}/${v.spec.claimRef.name}` : "",
+          v.spec?.storageClassName ?? "",
+          "<unset>",
+          v.status?.reason ?? "",
+          age(cluster, v.metadata.creationTimestamp),
+        ],
+        wideRow: (v) => [v.spec?.volumeMode ?? "Filesystem"],
+      };
+    case "StorageClass":
+      return {
+        headers: ["NAME", "PROVISIONER", "RECLAIMPOLICY", "VOLUMEBINDINGMODE", "ALLOWVOLUMEEXPANSION", "AGE"],
+        row: (c) => [
+          c.metadata.name + (c.metadata.annotations?.["storageclass.kubernetes.io/is-default-class"] === "true" ? " (default)" : ""),
+          String(c.provisioner ?? ""),
+          String(c.reclaimPolicy ?? "Delete"),
+          String(c.volumeBindingMode ?? "Immediate"),
+          c.allowVolumeExpansion ? "true" : "false",
+          age(cluster, c.metadata.creationTimestamp),
+        ],
+      };
+    case "HorizontalPodAutoscaler":
+      return {
+        headers: ["NAME", "REFERENCE", "TARGETS", "MINPODS", "MAXPODS", "REPLICAS", "AGE"],
+        row: (h) => {
+          const ref = h.spec?.scaleTargetRef ?? {};
+          const metric = (h.spec?.metrics ?? [])[0]?.resource;
+          const cur = (h.status?.currentMetrics ?? [])[0]?.resource?.current?.averageUtilization;
+          const targets = metric ? `${metric.name}: ${cur === undefined ? "<unknown>" : cur + "%"}/${metric.target?.averageUtilization ?? "?"}%` : "<none>";
+          return [h.metadata.name, `${ref.kind}/${ref.name}`, targets, String(h.spec?.minReplicas ?? 1), String(h.spec?.maxReplicas ?? ""), String(h.status?.currentReplicas ?? 0), age(cluster, h.metadata.creationTimestamp)];
+        },
+      };
+    case "ResourceQuota":
+      return {
+        headers: ["NAME", "AGE", "REQUEST", "LIMIT"],
+        row: (q) => {
+          const hard = (q.status?.hard ?? q.spec?.hard ?? {}) as Record<string, string>;
+          const used = (q.status?.used ?? {}) as Record<string, string>;
+          const fmt = (keys: string[]) => keys.map((k) => `${k}: ${used[k] ?? "0"}/${hard[k]}`).join(", ");
+          const limits = Object.keys(hard).filter((k) => k.startsWith("limits."));
+          const requests = Object.keys(hard).filter((k) => !k.startsWith("limits.")).sort();
+          return [q.metadata.name, age(cluster, q.metadata.creationTimestamp), fmt(requests), fmt(limits)];
+        },
+      };
+    case "LimitRange":
+    case "CustomResourceDefinition":
+      return { headers: ["NAME", "CREATED AT"], row: (r) => [r.metadata.name, r.metadata.creationTimestamp ?? ""] };
+    case "IngressClass":
+      return { headers: ["NAME", "CONTROLLER", "PARAMETERS", "AGE"], row: (c) => [c.metadata.name, c.spec?.controller ?? "", c.spec?.parameters ? `${c.spec.parameters.kind}/${c.spec.parameters.name}` : "<none>", age(cluster, c.metadata.creationTimestamp)] };
+    case "PodDisruptionBudget":
+      return {
+        headers: ["NAME", "MIN AVAILABLE", "MAX UNAVAILABLE", "ALLOWED DISRUPTIONS", "AGE"],
+        row: (d) => [d.metadata.name, d.spec?.minAvailable !== undefined ? String(d.spec.minAvailable) : "N/A", d.spec?.maxUnavailable !== undefined ? String(d.spec.maxUnavailable) : "N/A", String(d.status?.disruptionsAllowed ?? 0), age(cluster, d.metadata.creationTimestamp)],
+      };
+    case "PriorityClass":
+      return { headers: ["NAME", "VALUE", "GLOBAL-DEFAULT", "AGE", "PREEMPTIONPOLICY"], row: (c) => [c.metadata.name, String(c.value ?? 0), c.globalDefault ? "true" : "false", age(cluster, c.metadata.creationTimestamp), String(c.preemptionPolicy ?? "PreemptLowerPriority")] };
     default:
       return { headers: ["NAME", "AGE"], row: (o) => [o.metadata.name, age(cluster, o.metadata.creationTimestamp)] };
   }

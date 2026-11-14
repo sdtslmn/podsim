@@ -231,6 +231,46 @@ function volumesBlock(pod: KObject | undefined, volumes: Record<string, Record<s
   }
 }
 
+function probeText(p: Record<string, any>): string {
+  const timing = `delay=${p.initialDelaySeconds ?? 0}s timeout=${p.timeoutSeconds ?? 1}s period=${p.periodSeconds ?? 10}s #success=${p.successThreshold ?? 1} #failure=${p.failureThreshold ?? 3}`;
+  if (p.exec) return `exec [${(p.exec.command ?? []).join(" ")}] ${timing}`;
+  if (p.httpGet) return `http-get ${(p.httpGet.scheme ?? "HTTP").toLowerCase()}://${p.httpGet.host ?? ""}:${p.httpGet.port}${p.httpGet.path ?? "/"} ${timing}`;
+  if (p.tcpSocket) return `tcp-socket :${p.tcpSocket.port} ${timing}`;
+  if (p.grpc) return `grpc <pod>:${p.grpc.port} ${p.grpc.service ?? ""} ${timing}`;
+  return timing;
+}
+
+function containerBlock(pod: KObject, c: Record<string, any>, statuses: Record<string, unknown>[], w: Writer, waitingDefault: string): void {
+  const st = statuses.find((s) => s.name === c.name) as
+    | { containerID?: string; imageID?: string; state?: Record<string, Record<string, unknown>>; lastState?: Record<string, Record<string, unknown>>; ready?: boolean; restartCount?: number; started?: boolean }
+    | undefined;
+  w.head(2, `${c.name}:`);
+  if (st?.containerID) w.kv(4, "Container ID", st.containerID);
+  w.kv(4, "Image", c.image);
+  w.kv(4, "Image ID", st?.imageID || "");
+  w.kv(4, "Port", portText(c));
+  w.kv(4, "Host Port", (c.ports ?? []).length ? (c.ports ?? []).map((p: { protocol?: string }) => `0/${p.protocol ?? "TCP"}`).join(", ") : "<none>");
+  if (c.command) {
+    w.head(4, "Command:");
+    for (const x of c.command) w.head(6, x);
+  }
+  if (c.args) {
+    w.head(4, "Args:");
+    for (const x of c.args) w.head(6, x);
+  }
+  containerState(st?.state ?? { waiting: { reason: waitingDefault } }, w, 4, "State");
+  if (st?.lastState && Object.keys(st.lastState).length) containerState(st.lastState, w, 4, "Last State");
+  w.kv(4, "Ready", st?.ready ? "True" : "False");
+  w.kv(4, "Restart Count", String(st?.restartCount ?? 0));
+  if (c.restartPolicy) w.kv(4, "Restart Policy", c.restartPolicy);
+  resourcesBlock(c, w, 4);
+  if (c.livenessProbe) w.kv(4, "Liveness", probeText(c.livenessProbe));
+  if (c.readinessProbe) w.kv(4, "Readiness", probeText(c.readinessProbe));
+  if (c.startupProbe) w.kv(4, "Startup", probeText(c.startupProbe));
+  envLines(c, w, 4);
+  mountsBlock(pod, c, w, 4, true);
+}
+
 function describePod(cluster: Cluster, pod: KObject): string {
   const w = new Writer();
   const node = pod.spec?.nodeName ? cluster.get("Node", pod.spec.nodeName) : undefined;
@@ -252,34 +292,13 @@ function describePod(cluster: Cluster, pod: KObject): string {
   } else w.kv(0, "IPs", "<none>");
   const owner = pod.metadata.ownerReferences?.find((r) => r.controller);
   if (owner) w.kv(0, "Controlled By", `${owner.kind}/${owner.name}`);
-  w.head(0, "Containers:");
-  const statuses = (pod.status?.containerStatuses ?? []) as Record<string, unknown>[];
-  for (const c of pod.spec?.containers ?? []) {
-    const st = statuses.find((s) => s.name === c.name) as
-      | { containerID?: string; imageID?: string; state?: Record<string, Record<string, unknown>>; lastState?: Record<string, Record<string, unknown>>; ready?: boolean; restartCount?: number }
-      | undefined;
-    w.head(2, `${c.name}:`);
-    if (st?.containerID) w.kv(4, "Container ID", st.containerID);
-    w.kv(4, "Image", c.image);
-    w.kv(4, "Image ID", st?.imageID || "");
-    w.kv(4, "Port", portText(c));
-    w.kv(4, "Host Port", (c.ports ?? []).length ? (c.ports ?? []).map((p: { protocol?: string }) => `0/${p.protocol ?? "TCP"}`).join(", ") : "<none>");
-    if (c.command) {
-      w.head(4, "Command:");
-      for (const x of c.command) w.head(6, x);
-    }
-    if (c.args) {
-      w.head(4, "Args:");
-      for (const x of c.args) w.head(6, x);
-    }
-    containerState(st?.state ?? { waiting: { reason: "ContainerCreating" } }, w, 4, "State");
-    if (st?.lastState && Object.keys(st.lastState).length) containerState(st.lastState, w, 4, "Last State");
-    w.kv(4, "Ready", st?.ready ? "True" : "False");
-    w.kv(4, "Restart Count", String(st?.restartCount ?? 0));
-    resourcesBlock(c, w, 4);
-    envLines(c, w, 4);
-    mountsBlock(pod, c, w, 4, true);
+  const inits = (pod.spec?.initContainers ?? []) as Record<string, any>[];
+  if (inits.length) {
+    w.head(0, "Init Containers:");
+    for (const c of inits) containerBlock(pod, c, (pod.status?.initContainerStatuses ?? []) as Record<string, unknown>[], w, "PodInitializing");
   }
+  w.head(0, "Containers:");
+  for (const c of pod.spec?.containers ?? []) containerBlock(pod, c, (pod.status?.containerStatuses ?? []) as Record<string, unknown>[], w, "ContainerCreating");
   const conds = (pod.status?.conditions ?? []) as { type: string; status: string }[];
   if (conds.length) {
     w.head(0, "Conditions:");
@@ -384,6 +403,118 @@ function describeReplicaSet(cluster: Cluster, rs: KObject): string {
   w.kv(0, "Pods Status", `${count("Running")} Running / ${count("Pending")} Waiting / ${count("Succeeded")} Succeeded / ${count("Failed")} Failed`);
   podTemplateBlock(rs.spec?.template, w);
   eventsSection(cluster, w, rs);
+  return w.render();
+}
+
+function podsStatusLine(pods: KObject[]): string {
+  const count = (phase: string) => pods.filter((p) => p.status?.phase === phase).length;
+  return `${count("Running")} Active (${pods.filter((p) => p.status?.phase === "Running" && (p.status?.conditions ?? []).some((c: { type: string; status: string }) => c.type === "Ready" && c.status === "True")).length} Ready) / ${count("Succeeded")} Succeeded / ${count("Failed")} Failed`;
+}
+
+function describeJob(cluster: Cluster, j: KObject): string {
+  const w = new Writer();
+  const pods = cluster.list("Pod", j.metadata.namespace).filter((p) => ownedBy(p, j));
+  w.kv(0, "Name", j.metadata.name);
+  w.kv(0, "Namespace", j.metadata.namespace);
+  w.kv(0, "Selector", selectorText(j.spec?.selector));
+  w.kv(0, "Labels", labelsBlock(j.metadata.labels));
+  w.kv(0, "Annotations", annotationsBlock(j.metadata.annotations));
+  const owner = j.metadata.ownerReferences?.find((r) => r.controller);
+  if (owner) w.kv(0, "Controlled By", `${owner.kind}/${owner.name}`);
+  w.kv(0, "Parallelism", String(j.spec?.parallelism ?? 1));
+  w.kv(0, "Completions", j.spec?.completions === undefined ? "<unset>" : String(j.spec.completions));
+  w.kv(0, "Completion Mode", j.spec?.completionMode ?? "NonIndexed");
+  w.kv(0, "Suspend", j.spec?.suspend ? "true" : "false");
+  w.kv(0, "Backoff Limit", String(j.spec?.backoffLimit ?? 6));
+  if (j.spec?.activeDeadlineSeconds !== undefined) w.kv(0, "Active Deadline Seconds", `${j.spec.activeDeadlineSeconds}s`);
+  if (j.spec?.ttlSecondsAfterFinished !== undefined) w.kv(0, "TTL Seconds After Finished", String(j.spec.ttlSecondsAfterFinished));
+  if (j.status?.startTime) w.kv(0, "Start Time", rfc1123(j.status.startTime));
+  if (j.status?.completionTime) {
+    w.kv(0, "Completed At", rfc1123(j.status.completionTime));
+    w.kv(0, "Duration", humanDuration(Date.parse(j.status.completionTime) - Date.parse(j.status.startTime)));
+  }
+  w.kv(0, "Pods Statuses", `${j.status?.active ?? 0} Active (${j.status?.ready ?? 0} Ready) / ${j.status?.succeeded ?? 0} Succeeded / ${j.status?.failed ?? 0} Failed`);
+  void pods;
+  podTemplateBlock(j.spec?.template, w);
+  eventsSection(cluster, w, j);
+  return w.render();
+}
+
+function describeCronJob(cluster: Cluster, c: KObject): string {
+  const w = new Writer();
+  w.kv(0, "Name", c.metadata.name);
+  w.kv(0, "Namespace", c.metadata.namespace);
+  w.kv(0, "Labels", labelsBlock(c.metadata.labels));
+  w.kv(0, "Annotations", annotationsBlock(c.metadata.annotations));
+  w.kv(0, "Schedule", String(c.spec?.schedule ?? ""));
+  w.kv(0, "Concurrency Policy", c.spec?.concurrencyPolicy ?? "Allow");
+  w.kv(0, "Suspend", c.spec?.suspend ? "True" : "False");
+  w.kv(0, "Successful Job History Limit", String(c.spec?.successfulJobsHistoryLimit ?? 3));
+  w.kv(0, "Failed Job History Limit", String(c.spec?.failedJobsHistoryLimit ?? 1));
+  w.kv(0, "Starting Deadline Seconds", c.spec?.startingDeadlineSeconds !== undefined ? `${c.spec.startingDeadlineSeconds}s` : "<unset>");
+  const js = c.spec?.jobTemplate?.spec ?? {};
+  w.kv(0, "Selector", js.selector ? selectorText(js.selector) : "<unset>");
+  w.kv(0, "Parallelism", js.parallelism === undefined ? "<unset>" : String(js.parallelism));
+  w.kv(0, "Completions", js.completions === undefined ? "<unset>" : String(js.completions));
+  if (js.activeDeadlineSeconds !== undefined) w.kv(0, "Active Deadline Seconds", `${js.activeDeadlineSeconds}s`);
+  podTemplateBlock(js.template, w);
+  w.kv(0, "Last Schedule Time", c.status?.lastScheduleTime ? rfc1123(c.status.lastScheduleTime) : "<unset>");
+  const active = (c.status?.active ?? []) as { name: string }[];
+  w.kv(0, "Active Jobs", active.length ? active.map((a) => a.name).join(", ") : "<none>");
+  eventsSection(cluster, w, c);
+  return w.render();
+}
+
+function describeDaemonSet(cluster: Cluster, d: KObject): string {
+  const w = new Writer();
+  const pods = cluster.list("Pod", d.metadata.namespace).filter((p) => ownedBy(p, d));
+  const st = d.status ?? {};
+  w.kv(0, "Name", d.metadata.name);
+  w.kv(0, "Namespace", d.metadata.namespace);
+  w.kv(0, "Selector", selectorText(d.spec?.selector));
+  w.kv(0, "Node-Selector", d.spec?.template?.spec?.nodeSelector ? formatLabels(d.spec.template.spec.nodeSelector) : "<none>");
+  w.kv(0, "Labels", labelsBlock(d.metadata.labels));
+  w.kv(0, "Annotations", annotationsBlock({ "deprecated.daemonset.template.generation": String(d.metadata.generation ?? 1), ...(d.metadata.annotations ?? {}) }));
+  w.kv(0, "Desired Number of Nodes Scheduled", String(st.desiredNumberScheduled ?? 0));
+  w.kv(0, "Current Number of Nodes Scheduled", String(st.currentNumberScheduled ?? 0));
+  w.kv(0, "Number of Nodes Scheduled with Up-to-date Pods", String(st.updatedNumberScheduled ?? 0));
+  w.kv(0, "Number of Nodes Scheduled with Available Pods", String(st.numberAvailable ?? 0));
+  w.kv(0, "Number of Nodes Misscheduled", String(st.numberMisscheduled ?? 0));
+  const count = (phase: string) => pods.filter((p) => p.status?.phase === phase).length;
+  w.kv(0, "Pods Status", `${count("Running")} Running / ${count("Pending")} Waiting / ${count("Succeeded")} Succeeded / ${count("Failed")} Failed`);
+  podTemplateBlock(d.spec?.template, w);
+  eventsSection(cluster, w, d);
+  return w.render();
+}
+
+function describeStatefulSet(cluster: Cluster, s: KObject): string {
+  const w = new Writer();
+  const pods = cluster.list("Pod", s.metadata.namespace).filter((p) => ownedBy(p, s));
+  w.kv(0, "Name", s.metadata.name);
+  w.kv(0, "Namespace", s.metadata.namespace);
+  w.kv(0, "CreationTimestamp", rfc1123(s.metadata.creationTimestamp));
+  w.kv(0, "Selector", selectorText(s.spec?.selector));
+  w.kv(0, "Labels", labelsBlock(s.metadata.labels));
+  w.kv(0, "Annotations", annotationsBlock(s.metadata.annotations));
+  w.kv(0, "Replicas", `${s.spec?.replicas ?? 1} desired | ${s.status?.replicas ?? 0} total`);
+  w.kv(0, "Update Strategy", s.spec?.updateStrategy?.type ?? "RollingUpdate");
+  if ((s.spec?.updateStrategy?.type ?? "RollingUpdate") === "RollingUpdate") w.kv(2, "Partition", String(s.spec?.updateStrategy?.rollingUpdate?.partition ?? 0));
+  const count = (phase: string) => pods.filter((p) => p.status?.phase === phase).length;
+  w.kv(0, "Pods Status", `${count("Running")} Running / ${count("Pending")} Waiting / ${count("Succeeded")} Succeeded / ${count("Failed")} Failed`);
+  podTemplateBlock(s.spec?.template, w);
+  const vcts = (s.spec?.volumeClaimTemplates ?? []) as KObject[];
+  if (vcts.length) {
+    w.head(0, "Volume Claims:");
+    for (const v of vcts) {
+      w.kv(2, "Name", v.metadata?.name);
+      w.kv(2, "StorageClass", v.spec?.storageClassName ?? "");
+      w.kv(2, "Labels", labelsBlock(v.metadata?.labels));
+      w.kv(2, "Annotations", annotationsBlock(v.metadata?.annotations));
+      w.kv(2, "Capacity", v.spec?.resources?.requests?.storage ?? "");
+      w.kv(2, "Access Modes", (v.spec?.accessModes ?? []).join(","));
+    }
+  } else w.kv(0, "Volume Claims", "<none>");
+  eventsSection(cluster, w, s);
   return w.render();
 }
 
@@ -628,6 +759,14 @@ export function describe(cluster: Cluster, obj: KObject): string {
     case "RoleBinding":
     case "ClusterRoleBinding":
       return describeBinding(cluster, obj);
+    case "Job":
+      return describeJob(cluster, obj);
+    case "CronJob":
+      return describeCronJob(cluster, obj);
+    case "DaemonSet":
+      return describeDaemonSet(cluster, obj);
+    case "StatefulSet":
+      return describeStatefulSet(cluster, obj);
     default:
       return describeGeneric(cluster, obj);
   }

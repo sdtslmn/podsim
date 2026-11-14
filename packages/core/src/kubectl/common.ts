@@ -20,8 +20,21 @@ export interface IO {
   aborted?(): boolean;
 }
 
+export interface ContainerSession {
+  pod: string;
+  namespace: string;
+  container: string;
+  /** Delete the pod when the session ends (kubectl run --rm). */
+  remove: boolean;
+  /** Shell variables and working directory kept between lines. */
+  vars: Record<string, string>;
+  bash: boolean;
+}
+
 export interface KubectlState {
   namespace: string;
+  /** Set while the user is inside `kubectl exec -it POD -- sh`. */
+  session?: ContainerSession;
 }
 
 export interface Ctx {
@@ -64,7 +77,7 @@ export interface Target {
   names: string[];
 }
 
-const ALL_KINDS = ["Pod", "Service", "Deployment", "ReplicaSet"];
+const ALL_KINDS = ["Pod", "Service", "DaemonSet", "Deployment", "ReplicaSet", "StatefulSet", "HorizontalPodAutoscaler", "CronJob", "Job"];
 
 /**
  * Parse resource arguments: "pods", "pod web api", "pod/web svc/x",

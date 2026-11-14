@@ -27,7 +27,18 @@ export function tolerates(tolerations: Toleration[] | undefined, taint: Taint): 
   });
 }
 
-function matchNodeSelectorTerm(labels: Record<string, string>, term: { matchExpressions?: { key: string; operator: string; values?: string[] }[] }): boolean {
+export interface NodeSelectorTerm {
+  matchExpressions?: { key: string; operator: string; values?: string[] }[];
+  matchFields?: { key: string; operator: string; values?: string[] }[];
+}
+
+export function matchNodeSelectorTerm(labels: Record<string, string>, term: NodeSelectorTerm, nodeName?: string): boolean {
+  const fieldsOk = (term.matchFields ?? []).every((e) => {
+    if (e.key !== "metadata.name" || nodeName === undefined) return false;
+    const has = (e.values ?? []).includes(nodeName);
+    return e.operator === "In" ? has : e.operator === "NotIn" ? !has : false;
+  });
+  if (!fieldsOk) return false;
   return (term.matchExpressions ?? []).every((e) => {
     const has = Object.prototype.hasOwnProperty.call(labels, e.key);
     const v = labels[e.key];
@@ -94,7 +105,7 @@ export function findNode(cluster: Cluster, pod: KObject): { node?: string; messa
 
   for (const node of nodes) {
     const labels = node.metadata.labels ?? {};
-    if (node.spec?.unschedulable) {
+    if (node.spec?.unschedulable && !tolerates(pod.spec?.tolerations, { key: "node.kubernetes.io/unschedulable", effect: "NoSchedule" })) {
       add("node(s) were unschedulable");
       continue;
     }
@@ -113,7 +124,7 @@ export function findNode(cluster: Cluster, pod: KObject): { node?: string; messa
     const sel = pod.spec?.nodeSelector ?? {};
     const selOk = Object.entries(sel).every(([k, v]) => labels[k] === v);
     const terms = pod.spec?.affinity?.nodeAffinity?.requiredDuringSchedulingIgnoredDuringExecution?.nodeSelectorTerms;
-    const affOk = !terms || terms.some((term: { matchExpressions?: { key: string; operator: string; values?: string[] }[] }) => matchNodeSelectorTerm(labels, term));
+    const affOk = !terms || terms.some((term: NodeSelectorTerm) => matchNodeSelectorTerm(labels, term, node.metadata.name));
     if (!selOk || !affOk) {
       add("node(s) didn't match Pod's node affinity/selector");
       continue;

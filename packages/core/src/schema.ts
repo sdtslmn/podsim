@@ -142,6 +142,37 @@ const ServicePort = obj("ServicePort", { name: S, protocol: S, appProtocol: S, p
 
 const top = (kind: string, fields: Record<string, T>) => obj(kind, { apiVersion: S, kind: S, metadata: ObjectMeta, ...fields });
 
+const JobSpec = obj("JobSpec", {
+  parallelism: I,
+  completions: I,
+  activeDeadlineSeconds: I,
+  podFailurePolicy: A,
+  successPolicy: A,
+  backoffLimit: I,
+  backoffLimitPerIndex: I,
+  maxFailedIndexes: I,
+  selector: A,
+  manualSelector: B,
+  template: PodTemplate,
+  ttlSecondsAfterFinished: I,
+  completionMode: S,
+  suspend: B,
+  podReplacementPolicy: S,
+  managedBy: S,
+});
+
+const PVCSpec = obj("PersistentVolumeClaimSpec", {
+  accessModes: arr(S),
+  selector: A,
+  resources: obj("VolumeResourceRequirements", { requests: AMAP, limits: AMAP }),
+  volumeName: S,
+  storageClassName: S,
+  volumeMode: S,
+  dataSource: A,
+  dataSourceRef: A,
+  volumeAttributesClassName: S,
+});
+
 const SCHEMAS: Record<string, T> = {
   Pod: top("Pod", { spec: PodSpec, status: A }),
   Deployment: top("Deployment", {
@@ -183,6 +214,41 @@ const SCHEMAS: Record<string, T> = {
     }),
     status: A,
   }),
+  Job: top("Job", { spec: JobSpec, status: A }),
+  CronJob: top("CronJob", {
+    spec: obj("CronJobSpec", {
+      schedule: S,
+      timeZone: S,
+      startingDeadlineSeconds: I,
+      concurrencyPolicy: S,
+      suspend: B,
+      jobTemplate: obj("JobTemplateSpec", { metadata: ObjectMeta, spec: JobSpec }),
+      successfulJobsHistoryLimit: I,
+      failedJobsHistoryLimit: I,
+    }),
+    status: A,
+  }),
+  DaemonSet: top("DaemonSet", {
+    spec: obj("DaemonSetSpec", { selector: A, template: PodTemplate, updateStrategy: A, minReadySeconds: I, revisionHistoryLimit: I }),
+    status: A,
+  }),
+  StatefulSet: top("StatefulSet", {
+    spec: obj("StatefulSetSpec", {
+      replicas: I,
+      selector: A,
+      template: PodTemplate,
+      volumeClaimTemplates: arr(obj("PersistentVolumeClaim", { apiVersion: S, kind: S, metadata: ObjectMeta, spec: PVCSpec, status: A })),
+      serviceName: S,
+      podManagementPolicy: S,
+      updateStrategy: A,
+      revisionHistoryLimit: I,
+      minReadySeconds: I,
+      persistentVolumeClaimRetentionPolicy: A,
+      ordinals: A,
+    }),
+    status: A,
+  }),
+  PersistentVolumeClaim: top("PersistentVolumeClaim", { spec: PVCSpec, status: A }),
   ConfigMap: top("ConfigMap", { data: SMAP, binaryData: AMAP, immutable: B }),
   Secret: top("Secret", { data: SMAP, stringData: SMAP, type: S, immutable: B }),
   Namespace: top("Namespace", { spec: A, status: A }),

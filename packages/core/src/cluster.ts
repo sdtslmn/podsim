@@ -16,6 +16,7 @@ import {
 } from "./util.js";
 import { defaultPullPolicy } from "./images.js";
 import { runControllers, type PodSim } from "./controllers/index.js";
+import { parseSchedule } from "./cron.js";
 
 export interface ClusterOptions {
   /** Wall clock in ms. Defaults to Date.now. Tests pass a fake clock. */
@@ -57,6 +58,8 @@ export class Cluster {
   readonly podSims = new Map<string, PodSim>();
   /** Last time each controller made progress, used for progress deadlines. */
   readonly controllerState = new Map<string, number>();
+  /** Free-form memory for controllers (e.g. which finished jobs a CronJob already reported). */
+  readonly scratch = new Map<string, unknown>();
 
   constructor(opts: ClusterOptions = {}) {
     this.clockFn = opts.clock ?? (() => Date.now());
@@ -159,7 +162,7 @@ export class Cluster {
   // ---------------------------------------------------------------- API with validation
 
   /** Create an object as the API server would: validate, default, store. */
-  create(input: KObject, opts: { dryRun?: boolean } = {}): KObject {
+  create(input: KObject, opts: { dryRun?: boolean; at?: number } = {}): KObject {
     if (!input || typeof input !== "object" || !input.kind) {
       throw new KubeError("error: error validating data: [apiVersion not set, kind not set]");
     }
@@ -198,10 +201,11 @@ export class Cluster {
     this.validate(obj);
     this.applyDefaults(obj);
 
-    const now = this.now();
+    const now = opts.at ?? this.now();
     obj.metadata.uid = this.random.uid();
     obj.metadata.creationTimestamp = isoTime(now);
-    if (obj.spec !== undefined && ["Deployment", "ReplicaSet", "Pod"].includes(info.kind)) obj.metadata.generation = 1;
+    if (obj.spec !== undefined && GENERATION_KINDS.includes(info.kind)) obj.metadata.generation = 1;
+    if (info.kind === "Job") jobSelector(obj);
     if (opts.dryRun) return obj;
 
     this.allocate(obj);
@@ -247,7 +251,34 @@ export class Cluster {
       }
       obj.status = existing.status;
     }
-    if (info.kind === "Deployment" || info.kind === "ReplicaSet") {
+    if (info.kind === "Job") {
+      obj.spec.selector = obj.spec.selector ?? existing.spec.selector;
+      const tplLabels = { ...(existing.spec.template?.metadata?.labels ?? {}) };
+      obj.spec.template.metadata = { ...(obj.spec.template.metadata ?? {}), labels: { ...tplLabels, ...(obj.spec.template.metadata?.labels ?? {}) } };
+      if (stableStringify(obj.spec.template) !== stableStringify(existing.spec.template)) {
+        throw invalid("Job", obj.metadata.name, "spec.template: Invalid value: core.PodTemplateSpec{...}: field is immutable");
+      }
+      if (stableStringify(obj.spec.selector) !== stableStringify(existing.spec.selector)) {
+        throw invalid("Job", obj.metadata.name, `spec.selector: Invalid value: ${describeSelector(obj.spec.selector)}: field is immutable`);
+      }
+      if ((obj.spec.completions ?? null) !== (existing.spec.completions ?? null)) {
+        throw invalid("Job", obj.metadata.name, `spec.completions: Invalid value: ${obj.spec.completions}: field is immutable`);
+      }
+      obj.status = existing.status;
+    }
+    if (info.kind === "StatefulSet") {
+      const editable = ["replicas", "ordinals", "template", "updateStrategy", "persistentVolumeClaimRetentionPolicy", "minReadySeconds"];
+      const rest = (spec: Record<string, unknown>) => stableStringify(Object.fromEntries(Object.entries(spec).filter(([k]) => !editable.includes(k))));
+      if (rest(obj.spec) !== rest(existing.spec)) {
+        throw invalid("StatefulSet", obj.metadata.name, "spec: Forbidden: updates to statefulset spec for fields other than 'replicas', 'ordinals', 'template', 'updateStrategy', 'persistentVolumeClaimRetentionPolicy' and 'minReadySeconds' are forbidden");
+      }
+    }
+    if (["StatefulSet", "DaemonSet", "CronJob", "Job"].includes(info.kind)) {
+      obj.status = existing.status;
+      const changed = stableStringify(obj.spec) !== stableStringify(existing.spec);
+      obj.metadata.generation = (existing.metadata.generation ?? 1) + (changed ? 1 : 0);
+    }
+    if (info.kind === "Deployment" || info.kind === "ReplicaSet" || info.kind === "DaemonSet") {
       if (stableStringify(obj.spec.selector) !== stableStringify(existing.spec.selector)) {
         throw invalid(info.kind, obj.metadata.name, `spec.selector: Invalid value: ${describeSelector(obj.spec.selector)}: field is immutable`);
       }
@@ -314,6 +345,44 @@ export class Cluster {
             throw invalid("Service", name, `spec.ports[${i}].nodePort: Invalid value: ${p.nodePort}: provided port is not in the valid range. The range of valid ports is 30000-32767`);
           }
         });
+        break;
+      }
+      case "DaemonSet":
+      case "StatefulSet": {
+        const spec = obj.spec;
+        if (!spec) throw invalid(obj.kind, name, "spec: Required value");
+        if (!spec.selector) throw invalid(obj.kind, name, "spec.selector: Required value");
+        const labels = spec.template?.metadata?.labels;
+        if (!matchLabelSelector(labels, spec.selector)) {
+          throw invalid(obj.kind, name, `spec.template.metadata.labels: Invalid value: ${goMap(labels)}: \`selector\` does not match template \`labels\``);
+        }
+        validatePodSpec(obj.kind, name, spec.template?.spec, "spec.template.spec");
+        const rp = spec.template?.spec?.restartPolicy;
+        if (rp !== undefined && rp !== "Always") {
+          throw invalid(obj.kind, name, `spec.template.spec.restartPolicy: Unsupported value: "${rp}": supported values: "Always"`);
+        }
+        if (obj.kind === "StatefulSet" && spec.replicas !== undefined && (typeof spec.replicas !== "number" || spec.replicas < 0)) {
+          throw invalid(obj.kind, name, `spec.replicas: Invalid value: ${spec.replicas}: must be greater than or equal to 0`);
+        }
+        break;
+      }
+      case "Job":
+        validateJobSpec("Job", name, obj.spec, "spec");
+        break;
+      case "CronJob": {
+        const spec = obj.spec;
+        if (!spec) throw invalid("CronJob", name, "spec: Required value");
+        if (!spec.schedule) throw invalid("CronJob", name, "spec.schedule: Required value");
+        try {
+          parseSchedule(String(spec.schedule));
+        } catch (e) {
+          throw invalid("CronJob", name, `spec.schedule: Invalid value: "${spec.schedule}": ${(e as Error).message}`);
+        }
+        if (name.length > 52) throw invalid("CronJob", name, `metadata.name: Invalid value: "${name}": must be no more than 52 characters`);
+        if (spec.concurrencyPolicy !== undefined && !["Allow", "Forbid", "Replace"].includes(spec.concurrencyPolicy)) {
+          throw invalid("CronJob", name, `spec.concurrencyPolicy: Unsupported value: "${spec.concurrencyPolicy}": supported values: "Allow", "Forbid", "Replace"`);
+        }
+        validateJobSpec("CronJob", name, spec.jobTemplate?.spec, "spec.jobTemplate.spec");
         break;
       }
       case "ConfigMap":
@@ -384,7 +453,53 @@ export class Cluster {
         obj.status = obj.status ?? { phase: "Active" };
         break;
       case "PersistentVolumeClaim":
+        obj.spec = obj.spec ?? {};
+        obj.spec.volumeMode = obj.spec.volumeMode ?? "Filesystem";
         obj.status = obj.status ?? { phase: "Pending" };
+        break;
+      case "Job":
+        defaultJobSpec(obj.spec);
+        obj.status = obj.status ?? {};
+        break;
+      case "CronJob":
+        obj.spec.concurrencyPolicy = obj.spec.concurrencyPolicy ?? "Allow";
+        obj.spec.suspend = obj.spec.suspend ?? false;
+        obj.spec.successfulJobsHistoryLimit = obj.spec.successfulJobsHistoryLimit ?? 3;
+        obj.spec.failedJobsHistoryLimit = obj.spec.failedJobsHistoryLimit ?? 1;
+        obj.spec.jobTemplate = obj.spec.jobTemplate ?? {};
+        obj.spec.jobTemplate.metadata = obj.spec.jobTemplate.metadata ?? {};
+        defaultJobSpec(obj.spec.jobTemplate.spec, true);
+        obj.status = obj.status ?? {};
+        break;
+      case "DaemonSet":
+        obj.spec.updateStrategy = obj.spec.updateStrategy ?? { type: "RollingUpdate" };
+        if (obj.spec.updateStrategy.type === "RollingUpdate") {
+          obj.spec.updateStrategy.rollingUpdate = { maxSurge: 0, maxUnavailable: 1, ...(obj.spec.updateStrategy.rollingUpdate ?? {}) };
+        }
+        obj.spec.revisionHistoryLimit = obj.spec.revisionHistoryLimit ?? 10;
+        obj.spec.template.metadata = obj.spec.template.metadata ?? {};
+        defaultPodSpec(obj.spec.template.spec);
+        obj.status = obj.status ?? { currentNumberScheduled: 0, desiredNumberScheduled: 0, numberMisscheduled: 0, numberReady: 0 };
+        break;
+      case "StatefulSet":
+        obj.spec.replicas = obj.spec.replicas ?? 1;
+        obj.spec.podManagementPolicy = obj.spec.podManagementPolicy ?? "OrderedReady";
+        obj.spec.updateStrategy = obj.spec.updateStrategy ?? { type: "RollingUpdate" };
+        if (obj.spec.updateStrategy.type === "RollingUpdate") {
+          obj.spec.updateStrategy.rollingUpdate = { partition: 0, ...(obj.spec.updateStrategy.rollingUpdate ?? {}) };
+        }
+        obj.spec.revisionHistoryLimit = obj.spec.revisionHistoryLimit ?? 10;
+        obj.spec.persistentVolumeClaimRetentionPolicy = obj.spec.persistentVolumeClaimRetentionPolicy ?? { whenDeleted: "Retain", whenScaled: "Retain" };
+        obj.spec.template.metadata = obj.spec.template.metadata ?? {};
+        defaultPodSpec(obj.spec.template.spec);
+        for (const vct of obj.spec.volumeClaimTemplates ?? []) {
+          vct.apiVersion = vct.apiVersion ?? "v1";
+          vct.kind = vct.kind ?? "PersistentVolumeClaim";
+          vct.spec = vct.spec ?? {};
+          vct.spec.volumeMode = vct.spec.volumeMode ?? "Filesystem";
+          vct.status = vct.status ?? { phase: "Pending" };
+        }
+        obj.status = obj.status ?? { replicas: 0, availableReplicas: 0 };
         break;
     }
   }
@@ -713,6 +828,58 @@ export class Cluster {
       }
     }
   }
+}
+
+const GENERATION_KINDS = ["Deployment", "ReplicaSet", "Pod", "Job", "CronJob", "DaemonSet", "StatefulSet"];
+
+function validateJobSpec(kind: string, name: string, spec: KObject["spec"], path: string): void {
+  if (!spec) throw invalid(kind, name, `${path}: Required value`);
+  validatePodSpec(kind, name, spec.template?.spec, `${path}.template.spec`);
+  const rp = spec.template?.spec?.restartPolicy;
+  if (rp !== "OnFailure" && rp !== "Never") {
+    throw invalid(kind, name, rp === undefined || rp === "Always"
+      ? `${path}.template.spec.restartPolicy: Required value: valid values: "OnFailure", "Never"`
+      : `${path}.template.spec.restartPolicy: Unsupported value: "${rp}": supported values: "OnFailure", "Never"`);
+  }
+  for (const f of ["completions", "parallelism", "backoffLimit", "activeDeadlineSeconds", "ttlSecondsAfterFinished"]) {
+    const v = spec[f];
+    if (v !== undefined && (typeof v !== "number" || v < (f === "activeDeadlineSeconds" ? 1 : 0))) {
+      throw invalid(kind, name, `${path}.${f}: Invalid value: ${v}: must be greater than or equal to ${f === "activeDeadlineSeconds" ? 1 : 0}`);
+    }
+  }
+}
+
+function defaultJobSpec(spec: KObject["spec"], inTemplate = false): void {
+  if (!spec) return;
+  if (spec.completions === undefined && spec.parallelism === undefined) {
+    spec.completions = 1;
+    spec.parallelism = 1;
+  }
+  spec.parallelism = spec.parallelism ?? 1;
+  spec.backoffLimit = spec.backoffLimit ?? 6;
+  spec.completionMode = spec.completionMode ?? "NonIndexed";
+  spec.suspend = spec.suspend ?? false;
+  spec.podReplacementPolicy = spec.podReplacementPolicy ?? "TerminatingOrFailed";
+  spec.template = spec.template ?? {};
+  spec.template.metadata = spec.template.metadata ?? {};
+  defaultPodSpec(spec.template.spec);
+  void inTemplate;
+}
+
+/** Jobs get a selector on their own uid, and their pod template gets matching labels. */
+function jobSelector(job: KObject): void {
+  if (job.spec.manualSelector && job.spec.selector) return;
+  const uid = job.metadata.uid!;
+  const name = job.metadata.name;
+  job.spec.selector = { matchLabels: { "batch.kubernetes.io/controller-uid": uid } };
+  job.spec.template.metadata.labels = {
+    ...(job.spec.template.metadata.labels ?? {}),
+    "batch.kubernetes.io/controller-uid": uid,
+    "batch.kubernetes.io/job-name": name,
+    "controller-uid": uid,
+    "job-name": name,
+  };
+  job.metadata.labels = { "batch.kubernetes.io/controller-uid": uid, "batch.kubernetes.io/job-name": name, "controller-uid": uid, "job-name": name, ...(job.metadata.labels ?? {}) };
 }
 
 function parseTimeSafe(iso: string | undefined): number {

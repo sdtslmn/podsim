@@ -3,11 +3,11 @@
 
 import type { Cluster } from "../cluster.js";
 
-const OWNED_KINDS = ["ReplicaSet", "Pod"];
+const OWNED_KINDS = ["ReplicaSet", "Job", "Pod"];
 
 export function garbageCollect(cluster: Cluster): void {
   const uids = new Set<string>();
-  for (const kind of ["Deployment", "ReplicaSet", "Service", "Node"]) {
+  for (const kind of ["Deployment", "ReplicaSet", "Service", "Node", "Job", "CronJob", "DaemonSet", "StatefulSet"]) {
     for (const o of cluster.list(kind)) if (o.metadata.uid) uids.add(o.metadata.uid);
   }
   for (const kind of OWNED_KINDS) {

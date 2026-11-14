@@ -30,28 +30,23 @@ export const KINDS: KindInfo[] = [
   { kind: "NetworkPolicy", plural: "networkpolicies", singular: "networkpolicy", shortNames: ["netpol"], apiVersion: "networking.k8s.io/v1", namespaced: true, storageOnly: true },
   { kind: "Ingress", plural: "ingresses", singular: "ingress", shortNames: ["ing"], apiVersion: "networking.k8s.io/v1", namespaced: true, storageOnly: true },
   { kind: "PersistentVolumeClaim", plural: "persistentvolumeclaims", singular: "persistentvolumeclaim", shortNames: ["pvc"], apiVersion: "v1", namespaced: true },
+  { kind: "PersistentVolume", plural: "persistentvolumes", singular: "persistentvolume", shortNames: ["pv"], apiVersion: "v1", namespaced: false },
+  { kind: "StorageClass", plural: "storageclasses", singular: "storageclass", shortNames: ["sc"], apiVersion: "storage.k8s.io/v1", namespaced: false },
+  { kind: "Job", plural: "jobs", singular: "job", shortNames: [], apiVersion: "batch/v1", namespaced: true },
+  { kind: "CronJob", plural: "cronjobs", singular: "cronjob", shortNames: ["cj"], apiVersion: "batch/v1", namespaced: true },
+  { kind: "DaemonSet", plural: "daemonsets", singular: "daemonset", shortNames: ["ds"], apiVersion: "apps/v1", namespaced: true },
+  { kind: "StatefulSet", plural: "statefulsets", singular: "statefulset", shortNames: ["sts"], apiVersion: "apps/v1", namespaced: true },
+  { kind: "HorizontalPodAutoscaler", plural: "horizontalpodautoscalers", singular: "horizontalpodautoscaler", shortNames: ["hpa"], apiVersion: "autoscaling/v2", namespaced: true },
+  { kind: "ResourceQuota", plural: "resourcequotas", singular: "resourcequota", shortNames: ["quota"], apiVersion: "v1", namespaced: true },
+  { kind: "LimitRange", plural: "limitranges", singular: "limitrange", shortNames: ["limits"], apiVersion: "v1", namespaced: true },
+  { kind: "IngressClass", plural: "ingressclasses", singular: "ingressclass", shortNames: [], apiVersion: "networking.k8s.io/v1", namespaced: false },
+  { kind: "PodDisruptionBudget", plural: "poddisruptionbudgets", singular: "poddisruptionbudget", shortNames: ["pdb"], apiVersion: "policy/v1", namespaced: true, storageOnly: true },
+  { kind: "PriorityClass", plural: "priorityclasses", singular: "priorityclass", shortNames: ["pc"], apiVersion: "scheduling.k8s.io/v1", namespaced: false, storageOnly: true },
+  { kind: "CustomResourceDefinition", plural: "customresourcedefinitions", singular: "customresourcedefinition", shortNames: ["crd", "crds"], apiVersion: "apiextensions.k8s.io/v1", namespaced: false },
 ];
 
 /** Kinds learners will ask for that are planned but not simulated yet. */
-export const PLANNED_KINDS: Record<string, string> = {
-  jobs: "Job",
-  job: "Job",
-  cronjobs: "CronJob",
-  cronjob: "CronJob",
-  cj: "CronJob",
-  daemonsets: "DaemonSet",
-  daemonset: "DaemonSet",
-  ds: "DaemonSet",
-  statefulsets: "StatefulSet",
-  statefulset: "StatefulSet",
-  sts: "StatefulSet",
-  persistentvolumes: "PersistentVolume",
-  pv: "PersistentVolume",
-  storageclasses: "StorageClass",
-  sc: "StorageClass",
-  horizontalpodautoscalers: "HorizontalPodAutoscaler",
-  hpa: "HorizontalPodAutoscaler",
-};
+export const PLANNED_KINDS: Record<string, string> = {};
 
 const byName = new Map<string, KindInfo>();
 for (const k of KINDS) {

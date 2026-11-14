@@ -5,6 +5,8 @@
 
 import type { FileSystem } from "./fs.js";
 import type { Cluster } from "./cluster.js";
+import { execInContainer, identityFor } from "./podruntime.js";
+import { parseImage } from "./images.js";
 import { Kubectl, type IO } from "./kubectl/index.js";
 import { toBase64, fromBase64 } from "./cluster.js";
 
@@ -64,8 +66,62 @@ export class Shell {
     return unbalancedQuotes(text.replace(/<<-?\s*['"]?(\w+)['"]?[\s\S]*?\n\1(\n|$)/g, ""));
   }
 
+  /** The prompt to show while inside a container (kubectl exec -it), or undefined. */
+  sessionPrompt(): string | undefined {
+    const s = this.kubectl.state.session;
+    if (!s) return undefined;
+    const pod = this.cluster.get("Pod", s.pod, s.namespace);
+    const c = [...(pod?.spec?.containers ?? []), ...(pod?.spec?.initContainers ?? [])].find((x: { name: string }) => x.name === s.container);
+    const cwd = s.vars.PWD ?? "/";
+    const user = pod && c ? identityFor(pod, c).uid : 0;
+    const image = c ? parseImage(c.image).repository : "busybox";
+    if (s.bash || !["busybox", "alpine", "curlimages/curl", "nicolaka/netshoot", "polinux/stress"].includes(image)) return user === 0 ? `root@${s.pod}:${cwd}# ` : `I have no name!@${s.pod}:${cwd}$ `;
+    return `${cwd === (user === 0 ? "/root" : "") ? "~" : cwd} ${user === 0 ? "#" : "$"} `;
+  }
+
+  /** Run one line inside the current container session. */
+  private async sessionLine(input: string, io: IO): Promise<number> {
+    const s = this.kubectl.state.session!;
+    const line = input.trim();
+    const end = (code: number) => {
+      this.kubectl.state.session = undefined;
+      if (s.remove) {
+        this.cluster.advance();
+        if (this.cluster.get("Pod", s.pod, s.namespace)) this.cluster.remove("Pod", s.pod, s.namespace);
+        io.stdout(`pod "${s.pod}" deleted\n`);
+      }
+      return code;
+    };
+    const exitMatch = line.match(/^(exit|logout)(\s+(\d+))?$/);
+    if (exitMatch) {
+      const code = parseInt(exitMatch[3] ?? "0", 10);
+      if (!s.remove && this.cluster.get("Pod", s.pod, s.namespace)?.spec?.containers?.[0]?.stdin) io.stdout(`Session ended, resume using 'kubectl attach ${s.pod} -c ${s.container} -i -t' command when the pod is running\n`);
+      if (code !== 0 && !s.remove) io.stderr(`command terminated with exit code ${code}\n`);
+      return end(code);
+    }
+    if (!line) return 0;
+    this.cluster.advance();
+    const pod = this.cluster.get("Pod", s.pod, s.namespace);
+    const sim = pod ? this.cluster.podSims.get(pod.metadata.uid!) : undefined;
+    const cs = sim?.containers[s.container];
+    const c = [...(pod?.spec?.containers ?? []), ...(pod?.spec?.initContainers ?? [])].find((x: { name: string }) => x.name === s.container);
+    if (!pod || !cs || !c || cs.phase !== "running") {
+      io.stderr("command terminated with exit code 137\n");
+      return end(137);
+    }
+    const r = execInContainer(this.cluster, pod, c, cs, { script: input }, "", s.vars);
+    if (r.vars) s.vars = Object.fromEntries(Object.entries(r.vars).filter(([k]) => !["0", "@", "#", "?"].includes(k)));
+    if (r.stdout) io.stdout(r.stdout);
+    if (r.stderr) io.stderr(r.stderr);
+    if (r.blocked && r.blocked !== "timeout") io.stderr(`(podsim) "${line.split(/\s/)[0]}" keeps running in a real shell; the simulator shows what it printed and returns. Press Ctrl+C in a real terminal to stop it.\n`);
+    if (r.exited) return end(r.code);
+    this.cluster.advance();
+    return r.code;
+  }
+
   /** Execute one or more lines of input. Returns the exit code of the last command. */
   async exec(input: string, io: IO): Promise<number> {
+    if (this.kubectl.state.session) return this.sessionLine(input, io);
     const lines = input.replace(/\r/g, "").split("\n");
     let code = 0;
     let i = 0;
@@ -421,7 +477,17 @@ export class Shell {
       case "grep": {
         const flags = new Set<string>();
         const rest: string[] = [];
-        for (const a of args) {
+        let after = 0;
+        let before = 0;
+        for (let i = 0; i < args.length; i++) {
+          const a = args[i];
+          const ctxFlag = a.match(/^-([ABC])(\d*)$/);
+          if (ctxFlag) {
+            const n = parseInt(ctxFlag[2] || args[++i] || "0", 10);
+            if (ctxFlag[1] !== "B") after = n;
+            if (ctxFlag[1] !== "A") before = n;
+            continue;
+          }
           if (/^-[a-zA-Z]+$/.test(a)) for (const ch of a.slice(1)) flags.add(ch);
           else rest.push(a);
         }
@@ -434,9 +500,20 @@ export class Shell {
         } catch {
           re = new RegExp(pattern.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), flags.has("i") ? "i" : "");
         }
-        const matched = lines(input).filter((l) => re.test(l) !== flags.has("v"));
+        const all = lines(input);
+        const hits = all.map((l) => re.test(l) !== flags.has("v"));
+        const matched = all.filter((_, i) => hits[i]);
         if (flags.has("c")) out(`${matched.length}\n`);
-        else emit(matched);
+        else if (after || before) {
+          const keep = all.map((_, i) => hits.slice(Math.max(0, i - after), i + before + 1).some(Boolean));
+          const outLines: string[] = [];
+          all.forEach((l, i) => {
+            if (!keep[i]) return;
+            if (outLines.length && i > 0 && !keep[i - 1]) outLines.push("--");
+            outLines.push(l);
+          });
+          emit(outLines);
+        } else emit(matched);
         return matched.length ? 0 : 1;
       }
       case "head":

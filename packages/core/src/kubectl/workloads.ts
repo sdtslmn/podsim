@@ -7,6 +7,7 @@ import { parseImage } from "../images.js";
 import { deepClone, isoTime, stableStringify } from "../util.js";
 import { toBase64 } from "../cluster.js";
 import { CHANGE_CAUSE, REVISION, deploymentReplicaSets, templateWithoutHash } from "../controllers/deployment.js";
+import { revisionsOf } from "../controllers/workloads.js";
 import type { Flags } from "./flags.js";
 import { type Ctx, out, err, nsOf, ref, dryRun, singleTarget, notFoundError, kindOrThrow } from "./common.js";
 import { createFromFiles, printDryRun } from "./resources.js";
@@ -67,6 +68,12 @@ export async function cmdRun(ctx: Ctx, f: Flags): Promise<number> {
     });
   }
   container.resources = {};
+  const interactive = f.bool("i") || f.bool("stdin") || f.bool("it") || f.bool("t") || f.bool("tty") || f.bool("ti");
+  if (interactive) {
+    container.stdin = true;
+    container.stdinOnce = true;
+    container.tty = true;
+  }
   const pod: KObject = {
     apiVersion: "v1",
     kind: "Pod",
@@ -87,19 +94,11 @@ export async function cmdRun(ctx: Ctx, f: Flags): Promise<number> {
   const created = cluster.create(pod);
   cluster.advance();
 
-  const interactive = f.bool("i") || f.bool("stdin") || f.bool("it") || f.bool("t");
   if (!interactive && !f.bool("rm")) {
     out(ctx, `pod/${created.metadata.name} created`);
     return 0;
   }
-  if (!extra.length) {
-    err(ctx, "(podsim) interactive shells are not simulated yet. Add a command after --, for example:\n  kubectl run tmp --rm -it --image=busybox --restart=Never -- wget -qO- http://my-service");
-    if (f.bool("rm")) {
-      cluster.remove("Pod", name, ns);
-      out(ctx, `pod "${name}" deleted`);
-    }
-    return 1;
-  }
+  const shellSession = interactive && (!extra.length || (extra.length === 1 && /^(\/bin\/)?(sh|bash|ash)$/.test(extra[0])));
   // Wait for the pod to start (real time, a few seconds), then run the command in it.
   let started = false;
   for (let i = 0; i < 20 && !ctx.io.aborted?.(); i++) {
@@ -117,6 +116,11 @@ export async function cmdRun(ctx: Ctx, f: Flags): Promise<number> {
   if (!started) {
     err(ctx, `error: timed out waiting for the condition`);
     code = 1;
+  } else if (shellSession) {
+    const p = cluster.get("Pod", name, ns)!;
+    out(ctx, "If you don't see a command prompt, try pressing enter.");
+    ctx.state.session = { pod: name, namespace: ns, container: p.spec.containers[0].name, remove: f.bool("rm"), vars: { PWD: "/" }, bash: extra[0]?.endsWith("bash") ?? false };
+    return 0;
   } else {
     const p = cluster.get("Pod", name, ns)!;
     const r = runInContainer(cluster, p, p.spec.containers[0], f.bool("command") ? extra : extra);
@@ -316,11 +320,73 @@ export async function cmdCreate(ctx: Ctx, f: Flags): Promise<number> {
       };
       break;
     }
-    case "job":
+    case "job": {
+      const name = rest[0];
+      if (!name) throw new KubeError("error: exactly one NAME is required, got 0");
+      const from = f.str("from");
+      if (from) {
+        const [type, src] = from.split("/");
+        if (!src || !["cronjob", "cronjobs", "cj", "cronjob.batch", "cronjobs.batch"].includes(type.toLowerCase())) {
+          throw new KubeError(`error: from must be an existing cronjob: no kind "${type}" is registered for version`);
+        }
+        const cj = ctx.cluster.get("CronJob", src, ns);
+        if (!cj) throw new KubeError(`Error from server (NotFound): cronjobs.batch "${src}" not found`);
+        const tpl = deepClone(cj.spec.jobTemplate ?? {});
+        obj = {
+          apiVersion: "batch/v1",
+          kind: "Job",
+          metadata: {
+            name,
+            ...nsMeta,
+            labels: tpl.metadata?.labels,
+            annotations: { "cronjob.kubernetes.io/instantiate": "manual", ...(tpl.metadata?.annotations ?? {}) },
+            ownerReferences: [{ apiVersion: "batch/v1", kind: "CronJob", name: cj.metadata.name, uid: cj.metadata.uid!, controller: true }],
+          },
+          spec: tpl.spec,
+        };
+        if (!obj.metadata.labels) delete obj.metadata.labels;
+        break;
+      }
+      const image = f.str("image");
+      if (!image) throw new KubeError('error: required flag(s) "image" not set');
+      const container: Record<string, unknown> = { image, name, resources: {} };
+      if (f.rest.length) container.command = f.rest;
+      obj = {
+        apiVersion: "batch/v1",
+        kind: "Job",
+        metadata: { name, ...nsMeta },
+        spec: { template: { metadata: {}, spec: { containers: [container], restartPolicy: "Never" } } },
+        status: {},
+      };
+      break;
+    }
     case "cronjob":
+    case "cj": {
+      const name = rest[0];
+      if (!name) throw new KubeError("error: exactly one NAME is required, got 0");
+      const image = f.str("image");
+      if (!image) throw new KubeError('error: required flag(s) "image" not set');
+      const schedule = f.str("schedule");
+      if (!schedule) throw new KubeError('error: required flag(s) "schedule" not set');
+      const restart = f.str("restart") ?? "OnFailure";
+      if (!["OnFailure", "Never"].includes(restart)) throw new KubeError(`error: invalid restart policy: ${restart}`);
+      const container: Record<string, unknown> = { image, name, resources: {} };
+      if (f.rest.length) container.command = f.rest;
+      obj = {
+        apiVersion: "batch/v1",
+        kind: "CronJob",
+        metadata: { name, ...nsMeta },
+        spec: {
+          jobTemplate: { metadata: { name }, spec: { template: { metadata: {}, spec: { containers: [container], restartPolicy: restart } } } },
+          schedule,
+        },
+        status: {},
+      };
+      break;
+    }
     case "daemonset":
     case "statefulset":
-      throw new KubeError(`(podsim) ${sub} resources are not simulated yet. They are on the roadmap.`);
+      throw new KubeError(`error: Unexpected args: [${sub}]\nSee 'kubectl create -h' for help and examples. (Write a ${sub === "daemonset" ? "DaemonSet" : "StatefulSet"} manifest: a quick start is kubectl create deployment NAME --image=IMAGE --dry-run=client -o yaml, then change the kind.)`);
     case "ingress":
       throw new KubeError("(podsim) `kubectl create ingress` is not simulated yet. Write an Ingress manifest and use kubectl apply -f.");
     default:
@@ -424,7 +490,7 @@ export async function cmdScale(ctx: Ctx, f: Flags): Promise<number> {
   if (replicas === undefined) throw new KubeError("error: required flag(s) \"replicas\" not set");
   if (replicas < 0) throw new KubeError("error: The --replicas=COUNT flag is required, and COUNT must be greater than or equal to 0");
   const { info, name } = singleTarget(f.args, "scale");
-  if (!["Deployment", "ReplicaSet"].includes(info.kind)) {
+  if (!["Deployment", "ReplicaSet", "StatefulSet"].includes(info.kind)) {
     if (info.kind === "Pod") throw new KubeError(`error: no scaler has been implemented for {"" "Pod"}`);
     throw new KubeError(`error: no scaler has been implemented for {"" "${info.kind}"}`);
   }
@@ -447,6 +513,7 @@ export async function cmdScale(ctx: Ctx, f: Flags): Promise<number> {
 
 function containersOf(obj: KObject): Record<string, unknown>[] {
   if (obj.kind === "Pod") return obj.spec.containers;
+  if (obj.kind === "CronJob") return obj.spec.jobTemplate.spec.template.spec.containers;
   return obj.spec.template.spec.containers;
 }
 
@@ -459,7 +526,7 @@ export async function cmdSet(ctx: Ctx, f: Flags): Promise<number> {
     throw new KubeError(`error: unknown command "${sub ?? ""}" for "kubectl set"\n\nAvailable Commands:\n  env, image, resources, serviceaccount`);
   }
   const { info, name, rest: tail } = singleTarget(rest, "set");
-  if (!["Deployment", "ReplicaSet", "Pod"].includes(info.kind)) throw new KubeError(`error: ${info.plural} are not supported by set ${sub}`);
+  if (!["Deployment", "ReplicaSet", "Pod", "DaemonSet", "StatefulSet", "Job", "CronJob"].includes(info.kind)) throw new KubeError(`error: ${info.plural} are not supported by set ${sub}`);
   const obj = cluster.get(info.kind, name, ns);
   if (!obj) throw notFoundError(info, name);
   const copy = deepClone(obj);
@@ -533,6 +600,7 @@ export async function cmdSet(ctx: Ctx, f: Flags): Promise<number> {
     const sa = tail[0];
     if (!sa) throw new KubeError("error: serviceaccount is required");
     if (copy.kind === "Pod") copy.spec.serviceAccountName = sa;
+    else if (copy.kind === "CronJob") copy.spec.jobTemplate.spec.template.spec.serviceAccountName = sa;
     else copy.spec.template.spec.serviceAccountName = sa;
     cluster.replace(copy);
     out(ctx, `${ref(info, name)} serviceaccount updated`);
@@ -575,8 +643,8 @@ export async function cmdRollout(ctx: Ctx, f: Flags): Promise<number> {
   const subs = ["status", "history", "undo", "restart", "pause", "resume"];
   if (!subs.includes(sub ?? "")) throw new KubeError(`error: unknown command "${sub ?? ""}" for "kubectl rollout"\nAvailable Commands: ${subs.join(", ")}`);
   const { info, name } = singleTarget(rest, `rollout ${sub}`);
+  if (info.kind === "DaemonSet" || info.kind === "StatefulSet") return rolloutSet(ctx, f, sub, info, name, ns);
   if (info.kind !== "Deployment") {
-    if (["DaemonSet", "StatefulSet"].includes(info.kind)) throw new KubeError(`(podsim) ${info.kind} rollouts are not simulated yet.`);
     throw new KubeError(`error: no ${sub === "history" ? "history viewer" : sub === "status" ? "status viewer" : "rollbacker"} has been implemented for "${info.kind}"`);
   }
   let d = cluster.get("Deployment", name, ns);
@@ -685,6 +753,105 @@ export async function cmdRollout(ctx: Ctx, f: Flags): Promise<number> {
     }
   }
   return 0;
+}
+
+function setRolloutMessage(o: KObject): { done: boolean; message: string } {
+  const name = o.metadata.name;
+  const st = o.status ?? {};
+  if ((o.metadata.generation ?? 0) > (st.observedGeneration ?? 0)) return { done: false, message: `Waiting for ${o.kind === "DaemonSet" ? "daemon set" : "statefulset"} spec update to be observed...` };
+  if (o.kind === "DaemonSet") {
+    const desired = st.desiredNumberScheduled ?? 0;
+    const updated = st.updatedNumberScheduled ?? 0;
+    const available = st.numberAvailable ?? 0;
+    if (updated < desired) return { done: false, message: `Waiting for daemon set "${name}" rollout to finish: ${updated} out of ${desired} new pods have been updated...` };
+    if (available < desired) return { done: false, message: `Waiting for daemon set "${name}" rollout to finish: ${available} of ${desired} updated pods are available...` };
+    return { done: true, message: `daemon set "${name}" successfully rolled out` };
+  }
+  const replicas = o.spec.replicas ?? 1;
+  const ready = st.readyReplicas ?? 0;
+  if (ready < replicas) return { done: false, message: `Waiting for ${replicas - ready} pods to be ready...` };
+  const partition = o.spec.updateStrategy?.rollingUpdate?.partition ?? 0;
+  if (partition > 0) {
+    const want = replicas - partition;
+    if ((st.updatedReplicas ?? 0) < want) return { done: false, message: `Waiting for partitioned roll out to finish: ${st.updatedReplicas ?? 0} out of ${want} new pods have been updated...` };
+    return { done: true, message: `partitioned roll out complete: ${st.updatedReplicas ?? 0} new pods have been updated...` };
+  }
+  if (st.updateRevision !== st.currentRevision) return { done: false, message: `waiting for statefulset rolling update to complete ${st.updatedReplicas ?? 0} pods at revision ${st.updateRevision}...` };
+  return { done: true, message: `statefulset rolling update complete ${replicas} pods at revision ${st.currentRevision}...` };
+}
+
+async function rolloutSet(ctx: Ctx, f: Flags, sub: string, info: ReturnType<typeof kindOrThrow>, name: string, ns: string): Promise<number> {
+  const { cluster } = ctx;
+  let o = cluster.get(info.kind, name, ns);
+  if (!o) throw notFoundError(info, name);
+  const refName = ref(info, name);
+  switch (sub) {
+    case "status": {
+      const watch = f.str("watch") !== "false" && f.str("w") !== "false";
+      const timeout = parseDuration(f.str("timeout"), 30000);
+      const start = Date.now();
+      let last = "";
+      for (;;) {
+        cluster.advance();
+        o = cluster.get(info.kind, name, ns);
+        if (!o) throw notFoundError(info, name);
+        const m = setRolloutMessage(o);
+        if (m.message !== last) {
+          out(ctx, m.message);
+          last = m.message;
+        }
+        if (m.done || !watch) return 0;
+        if (ctx.io.aborted?.()) return 130;
+        if (Date.now() - start > timeout) {
+          err(ctx, f.str("timeout") ? "error: timed out waiting for the condition" : `(podsim) stopped waiting after ${Math.round(timeout / 1000)}s. The rollout is still in progress. Check the pods with: kubectl get pods`);
+          return 1;
+        }
+        await ctx.io.sleep(1000);
+      }
+    }
+    case "history": {
+      const revs = revisionsOf(cluster, o);
+      const revision = f.int("revision");
+      if (revision !== undefined && revision > 0) {
+        const r = revs.find((x) => x.revision === revision);
+        if (!r) throw new KubeError(`error: unable to find the specified revision`);
+        const lines = [`${refName} with revision #${revision}`, "Pod Template:", `  Labels:\t${Object.entries(r.template?.metadata?.labels ?? {}).map(([k, v]) => `${k}=${v}`).join("\n\t")}`, "  Containers:"];
+        for (const c of r.template?.spec?.containers ?? []) lines.push(`   ${c.name}:`, `    Image:\t${c.image}`);
+        out(ctx, lines.join("\n"));
+        return 0;
+      }
+      const rows = revs.map((r) => [String(r.revision), r.cause ?? "<none>"]);
+      out(ctx, `${refName} \nREVISION  CHANGE-CAUSE\n${rows.map((r) => r[0].padEnd(10) + r[1]).join("\n")}\n`);
+      return 0;
+    }
+    case "undo": {
+      const revs = revisionsOf(cluster, o).sort((a, b) => b.revision - a.revision);
+      const toRev = f.int("to-revision") ?? 0;
+      const target = toRev > 0 ? revs.find((r) => r.revision === toRev) : revs[1];
+      if (!target) throw new KubeError(toRev > 0 ? `error: unable to find specified revision ${toRev} in history` : `error: no rollout history found for ${info.singular} "${name}"`);
+      if (stableStringify(target.template) === stableStringify(o.spec.template)) {
+        out(ctx, `${refName} skipped rollback (current template already matches revision ${target.revision})`);
+        return 0;
+      }
+      const copy = deepClone(o);
+      copy.spec.template = deepClone(target.template);
+      cluster.replace(copy);
+      cluster.advance();
+      out(ctx, `${refName} rolled back`);
+      return 0;
+    }
+    case "restart": {
+      const copy = deepClone(o);
+      copy.spec.template.metadata = copy.spec.template.metadata ?? {};
+      copy.spec.template.metadata.annotations = { ...(copy.spec.template.metadata.annotations ?? {}), "kubectl.kubernetes.io/restartedAt": isoTime(cluster.now()) };
+      cluster.replace(copy);
+      cluster.advance();
+      out(ctx, `${refName} restarted`);
+      return 0;
+    }
+    default:
+      throw new KubeError(`error: ${refName} ${sub === "pause" ? "pausing" : "resuming"} is not supported`);
+  }
 }
 
 export { rfc1123 };

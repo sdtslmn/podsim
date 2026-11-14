@@ -112,7 +112,7 @@ const io: IO = {
   aborted: () => aborted,
 };
 
-const prompt = () => `${lab ? C.yellow(`[${lab.id.split("-")[0]}] `) : ""}${C.green("controlplane")}:${C.cyan("~")}$ `;
+const prompt = () => shell.sessionPrompt() ?? `${lab ? C.yellow(`[${lab.id.split("-")[0]}] `) : ""}${C.green("controlplane")}:${C.cyan("~")}$ `;
 
 const KUBECTL_VERBS = ["get", "describe", "create", "apply", "delete", "run", "expose", "scale", "set", "rollout", "logs", "exec", "label", "annotate", "patch", "replace", "cordon", "uncordon", "drain", "taint", "config", "auth", "wait", "api-resources", "cluster-info", "version"];
 const RESOURCES = ["pods", "deployments", "replicasets", "services", "endpoints", "configmaps", "secrets", "namespaces", "nodes", "events", "serviceaccounts", "all"];

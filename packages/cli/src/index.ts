@@ -417,6 +417,8 @@ EDITOR (e.g. EDITOR="code --wait") to open them with vi/nano/code from here.`);
   }
 
   private prompt(): string {
+    const inContainer = this.shell.sessionPrompt();
+    if (inContainer) return inContainer;
     const tag = this.lab ? yellow(`[${this.lab.id.split("-")[0]}] `) : "";
     return `${tag}${green("controlplane")}:${cyan("~")}$ `;
   }

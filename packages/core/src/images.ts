@@ -47,7 +47,7 @@ export function parseImage(image: string): ParsedImage {
   return { registry, repository: rest, tag, digest };
 }
 
-const SHELL_IMAGES = new Set(["busybox", "alpine", "ubuntu", "debian", "centos", "fedora", "python", "node", "golang", "curlimages/curl", "nicolaka/netshoot"]);
+const SHELL_IMAGES = new Set(["busybox", "alpine", "ubuntu", "debian", "centos", "fedora", "python", "node", "golang", "curlimages/curl", "nicolaka/netshoot", "polinux/stress"]);
 
 interface ServerImage {
   logs: (env: Record<string, string>) => string[];

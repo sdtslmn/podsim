@@ -8,3 +8,6 @@ export { LabSession, type CheckResult } from "./labs/session.js";
 export { parseCurriculum, curriculumOrder, labPlace, labCode, findLabByRef, type Curriculum, type Level, type Module, type Track, type TrackSection } from "./labs/curriculum.js";
 export { ExamSession, parseExam, examTaskLabs, type Exam, type ExamTask, type ExamResult, type TaskResult } from "./labs/exam.js";
 export { humanDuration } from "./util.js";
+
+export { trafficEvents, type TrafficEvent } from "./podruntime.js";
+export { clusterView, SYSTEM_NAMESPACES, type ClusterView, type PodView, type PodState, type NodeView, type ServiceView, type IngressView, type IngressRoute, type PolicyView } from "./visual.js";

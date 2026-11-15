@@ -133,6 +133,15 @@ The CKAD track reuses labs from every level, grouped by the five domains of the 
 
 Each lab is a YAML file in [`labs/`](labs), and [`labs/curriculum.yaml`](labs/curriculum.yaml) puts them in order. Writing a new one takes a few minutes, see [docs/writing-labs.md](docs/writing-labs.md).
 
+## Visualizer
+
+The **Visualizer** tab in the browser draws the cluster and updates live as you type commands:
+
+- **Nodes**: every node with its Pods inside, grouped by Deployment, StatefulSet, DaemonSet or Job, coloured by status. New Pods pop in as they start, deleted ones fade out, Pods that cannot be scheduled wait in their own box, and taints, labels, cordons and requested CPU and memory are shown per node.
+- **Network**: Ingress rules, Services and the Pods behind them (ready endpoints solid, not ready dashed), and a shield on Pods covered by a NetworkPolicy. Click a policy to outline what it selects and read its rules in plain words. Every request is animated: a green dot when it gets through, a red one where a policy, a missing endpoint or blocked DNS stops it.
+
+Click any Pod for its node, IP, owner, labels, Services and policies. The Visualizer is switched off during the mock exams, like the real exam.
+
 ## Mock exams
 
 `ckad-mock-1` and `ckad-mock-2` each have 16 weighted tasks across all five domains, a 120 minute timer and a 66% pass mark, like the real exam. You start on a base node and connect to each task's host with `ssh`, where a separate simulated cluster waits for you. At the end every task is scored automatically, with partial credit per check, and you get the breakdown and a reference solution for each task.

@@ -977,7 +977,48 @@ export function podListener(cluster: Cluster, pod: KObject, port: number): { con
 }
 
 /** Open a connection from `from` (a pod, or undefined for a node) to host:port, following Services. */
+/** One connection attempt, kept for the visualizer. */
+export interface TrafficEvent {
+  seq: number;
+  t: number;
+  /** The client Pod, or undefined for the simulator host (curl from the terminal). */
+  from?: { ns: string; name: string };
+  host: string;
+  port: number;
+  /** The Service the request went through, if any. */
+  service?: { ns: string; name: string };
+  /** The Pod that answered, or would have answered. */
+  pod?: { ns: string; name: string };
+  ok: boolean;
+  error?: string;
+  /** Why the connection failed, when a NetworkPolicy or DNS rule stopped it. */
+  blocked?: "ingress-policy" | "egress-policy" | "dns";
+}
+
+const TRAFFIC_LIMIT = 200;
+
+/** Recent connection attempts, oldest first. Pass the last seen seq to get only newer ones. */
+export function trafficEvents(cluster: Cluster, afterSeq = 0): TrafficEvent[] {
+  const log = (cluster.scratch.get("traffic") as TrafficEvent[] | undefined) ?? [];
+  return log.filter((e) => e.seq > afterSeq);
+}
+
+type Blocked = TrafficEvent["blocked"];
+
 export function connect(cluster: Cluster, from: KObject | undefined, ns: string, host: string, port: number, protocol = "TCP"): { conn: Conn; target?: Target } {
+  const r = connectInner(cluster, from, ns, host, port, protocol);
+  const log = (cluster.scratch.get("traffic") as TrafficEvent[] | undefined) ?? [];
+  const seq = ((cluster.scratch.get("traffic-seq") as number | undefined) ?? 0) + 1;
+  cluster.scratch.set("traffic-seq", seq);
+  const ref = (o?: KObject) => (o ? { ns: o.metadata.namespace ?? "default", name: o.metadata.name } : undefined);
+  const pod = r.conn.ok ? r.conn.pod : (r.target?.pod ?? r.attempted);
+  log.push({ seq, t: cluster.now(), from: ref(from), host, port, service: ref(r.target?.service), pod: ref(pod), ok: r.conn.ok, ...(r.conn.ok ? {} : { error: r.conn.error }), ...(r.blocked ? { blocked: r.blocked } : {}) });
+  if (log.length > TRAFFIC_LIMIT) log.splice(0, log.length - TRAFFIC_LIMIT);
+  cluster.scratch.set("traffic", log);
+  return { conn: r.conn, target: r.target };
+}
+
+function connectInner(cluster: Cluster, from: KObject | undefined, ns: string, host: string, port: number, protocol = "TCP"): { conn: Conn; target?: Target; blocked?: Blocked; attempted?: KObject } {
   const isIp = /^\d+\.\d+\.\d+\.\d+$/.test(host);
   if (!from && (host === "localhost" || host === "127.0.0.1")) {
     const fwd = (cluster.scratch.get("portforwards") as Record<number, { pod: string; ns: string; port: number }> | undefined)?.[port];
@@ -993,9 +1034,9 @@ export function connect(cluster: Cluster, from: KObject | undefined, ns: string,
     const svc = cluster.list("Service").find((sv) => (sv.spec?.ports ?? []).some((p: { nodePort?: number }) => p.nodePort === port));
     if (!svc) return { conn: { ok: false, error: "refused" }, target: { ip: nodeIp } };
     const sp = svc.spec.ports.find((p: { nodePort?: number }) => p.nodePort === port);
-    return connect(cluster, from, svc.metadata.namespace ?? "default", svc.spec.clusterIP, sp.port, protocol);
+    return connectInner(cluster, from, svc.metadata.namespace ?? "default", svc.spec.clusterIP, sp.port, protocol);
   }
-  if (!isIp && host !== "localhost" && !dnsCheck(cluster, from)) return { conn: { ok: false, error: "unresolved" } };
+  if (!isIp && host !== "localhost" && !dnsCheck(cluster, from)) return { conn: { ok: false, error: "unresolved" }, blocked: "dns" };
   if (!from && !isIp && host !== "localhost") return { conn: { ok: false, error: "unresolved" } };
   const target = resolveHost(cluster, ns, host);
   if (!target) return { conn: { ok: false, error: "unresolved" } };
@@ -1010,7 +1051,7 @@ export function connect(cluster: Cluster, from: KObject | undefined, ns: string,
     if (svc.spec?.type === "ExternalName") return { conn: { ok: false, error: "timeout" }, target };
     const sp = (svc.spec.ports ?? []).find((p: { port: number }) => p.port === port);
     if (!sp) return { conn: { ok: false, error: "timeout" }, target };
-    if (!egressCheck(cluster, from, svc.spec.clusterIP, port, protocol)) return { conn: { ok: false, error: "timeout" }, target };
+    if (!egressCheck(cluster, from, svc.spec.clusterIP, port, protocol)) return { conn: { ok: false, error: "timeout" }, target, blocked: "egress-policy" };
     const ready = cluster.list("Pod", svc.metadata.namespace).filter((p) => svc.spec.selector && matchMap(p.metadata.labels, svc.spec.selector) && isReady(p) && p.status?.podIP);
     if (ready.length === 0) return { conn: { ok: false, error: "refused" }, target };
     const key = `rr/${svc.metadata.uid}`;
@@ -1028,8 +1069,8 @@ export function connect(cluster: Cluster, from: KObject | undefined, ns: string,
     return { conn: { ok: false, error: "unresolved" }, target };
   }
   if (!pod) return { conn: { ok: false, error: "timeout" }, target };
-  if (!egressCheck(cluster, from, pod.status?.podIP ?? "", podPort, protocol, pod)) return { conn: { ok: false, error: "timeout" }, target };
-  if (!policyCheck(cluster, from, pod, podPort, protocol)) return { conn: { ok: false, error: "timeout" }, target };
+  if (!egressCheck(cluster, from, pod.status?.podIP ?? "", podPort, protocol, pod)) return { conn: { ok: false, error: "timeout" }, target, blocked: "egress-policy", attempted: pod };
+  if (!policyCheck(cluster, from, pod, podPort, protocol)) return { conn: { ok: false, error: "timeout" }, target, blocked: "ingress-policy", attempted: pod };
   const l = podListener(cluster, pod, podPort);
   if (!l) return { conn: { ok: false, error: "refused" }, target };
   return { conn: { ok: true, pod, port: podPort, ...l }, target };

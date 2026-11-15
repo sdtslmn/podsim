@@ -7,6 +7,7 @@ import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import { Cluster, Shell, LabSession, MemoryFS, parseLab, parseExam, parseCurriculum, curriculumOrder, labPlace, labCode, findLabByRef, ExamSession, K8S_VERSION, type IO, type Lab, type CheckResult, type Exam, type ExamResult, type Curriculum } from "@podsim/core";
 import curriculumText from "../../../labs/curriculum.yaml?raw";
+import { Visualizer } from "./visualizer";
 import { LineEditor } from "./line-editor";
 
 const REPO_URL: string = import.meta.env.VITE_REPO_URL ?? "https://github.com/sdtslmn/podsim";
@@ -131,7 +132,7 @@ const termMd = (s: string) => s.replace(/`([^`]+)`/g, (_, c) => C.cyan(c));
 
 // ---------------------------------------------------------------- state
 
-type View = "labs" | "lab" | "sandbox" | "files" | "exam-intro" | "exam" | "exam-result";
+type View = "labs" | "lab" | "sandbox" | "files" | "exam-intro" | "exam" | "exam-result" | "visualizer";
 
 const panel = document.getElementById("panel")!;
 const done = loadProgress();
@@ -151,6 +152,10 @@ let examPick: Exam | undefined = exams[0];
 let examTask = 1;
 let examResult: { exam: Exam; result: ExamResult } | undefined;
 let examTimer: ReturnType<typeof setInterval> | undefined;
+const visualizer = new Visualizer(
+  () => (exam ? undefined : cluster),
+  () => shell.kubectl.state.namespace,
+);
 
 (document.getElementById("nav-repo") as HTMLAnchorElement).href = REPO_URL;
 
@@ -240,6 +245,7 @@ const editor = new LineEditor(term, {
         print(C.red(`internal error: ${(e as Error).message}`));
       }
       if (view === "files") renderPanel();
+      if (visualizer.mounted) visualizer.refresh();
     }
     editor.showPrompt(false);
   },
@@ -601,13 +607,23 @@ Edit files in the Files panel, or with: vi file.yaml`);
 // ---------------------------------------------------------------- panel
 
 function setNav(): void {
-  for (const id of ["labs", "sandbox", "files", "exam"]) {
-    document.getElementById(`nav-${id}`)!.classList.toggle("active", view === id || (id === "labs" && view === "lab") || (id === "exam" && view.startsWith("exam")));
+  for (const id of ["labs", "sandbox", "files", "exam", "viz"]) {
+    document.getElementById(`nav-${id}`)!.classList.toggle("active", view === id || (id === "labs" && view === "lab") || (id === "exam" && view.startsWith("exam")) || (id === "viz" && view === "visualizer"));
   }
 }
 
 function renderPanel(): void {
   setNav();
+  if (view !== "visualizer") visualizer.unmount();
+  if (view === "visualizer") {
+    if (exam) {
+      panel.innerHTML = `<h2>Visualizer</h2><p class="meta">The visualizer is off during the mock exam, like in the real exam. It comes back when you end the exam.</p><div class="actions"><button class="btn" id="viz-back">Back to the exam</button></div>`;
+      panel.querySelector("#viz-back")?.addEventListener("click", () => ((view = "exam"), renderPanel()));
+      return;
+    }
+    if (!visualizer.mounted) visualizer.mount(panel);
+    return;
+  }
   if (view === "files") return renderFiles();
   if (view === "exam" && exam) return renderExam();
   if (view === "exam-result" && examResult) return renderExamResult();
@@ -809,6 +825,10 @@ document.getElementById("nav-sandbox")!.addEventListener("click", () => {
   }
   term.write("\r\x1b[K");
   startSandbox();
+});
+document.getElementById("nav-viz")!.addEventListener("click", () => {
+  view = "visualizer";
+  renderPanel();
 });
 document.getElementById("nav-exam")!.addEventListener("click", () => {
   view = exam ? "exam" : examResult && view !== "exam-result" ? "exam-result" : "exam-intro";

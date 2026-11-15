@@ -485,3 +485,439 @@ details.level h4 {
 .lab-list li > span:nth-child(2) {
   flex: 1;
 }
+
+/* ---------------------------------------------------------------- visualizer */
+
+.viz-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin-bottom: 8px;
+}
+
+.tabs.small {
+  margin: 0;
+  border-bottom: 0;
+}
+
+.viz-head select {
+  font: inherit;
+  font-size: 13px;
+  padding: 3px 6px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+}
+
+.nodes {
+  display: grid;
+  gap: 10px;
+}
+
+.node-card {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 8px 10px;
+  background: #fff;
+}
+
+.node-card.cordoned {
+  background: repeating-linear-gradient(135deg, #fff, #fff 8px, #fbf6e9 8px, #fbf6e9 16px);
+}
+
+.node-card.unscheduled {
+  border-style: dashed;
+  background: #fafafa;
+}
+
+.node-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.node-tags {
+  margin: 4px 0;
+}
+
+.badge {
+  display: inline-block;
+  font-size: 11px;
+  padding: 1px 6px;
+  border-radius: 8px;
+  background: #eef0f3;
+  margin-right: 4px;
+}
+
+.badge.warn {
+  background: #fff3cd;
+  color: #7a5a00;
+}
+
+.badge.bad,
+.badge.s-failed {
+  background: #fde8e8;
+  color: #a12020;
+}
+
+.badge.taint {
+  background: #f3e8fd;
+  color: #5b2a86;
+}
+
+.badge.label {
+  background: #e8f1fd;
+  color: #1f4fbf;
+}
+
+.badge.s-running {
+  background: #e3f5e8;
+  color: #1a7f37;
+}
+
+.bars {
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  align-items: center;
+  gap: 2px 8px;
+  margin: 6px 0;
+  font-size: 12px;
+}
+
+.bars .progress {
+  width: 100%;
+}
+
+.progress.hot span {
+  background: var(--bad);
+}
+
+.group {
+  margin-top: 6px;
+}
+
+.group-title {
+  font-size: 11px;
+  color: var(--muted);
+  margin-bottom: 3px;
+}
+
+.pods {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.pod {
+  font: 12px ui-monospace, "Cascadia Code", Consolas, monospace;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 3px 7px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: #fff;
+  cursor: pointer;
+}
+
+.pod.sel {
+  outline: 2px solid var(--accent);
+}
+
+.pod.s-terminating,
+.pod.gone {
+  opacity: 0.45;
+  text-decoration: line-through;
+}
+
+.pod.new,
+.n-pod.new {
+  animation: pop-in 0.7s ease-out;
+}
+
+.pod.gone {
+  animation: fade-out 1.5s forwards;
+}
+
+@keyframes pop-in {
+  from {
+    opacity: 0;
+    transform: scale(0.6);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+@keyframes fade-out {
+  to {
+    opacity: 0;
+  }
+}
+
+.restarts {
+  font-size: 10px;
+  color: var(--bad);
+}
+
+.dot {
+  display: inline-block;
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  background: #999;
+}
+
+.dot.s-running,
+.n-pod.s-running .dot-svg {
+  background: #2da44e;
+  fill: #2da44e;
+}
+
+.dot.s-notready,
+.n-pod.s-notready .dot-svg {
+  background: #d29922;
+  fill: #d29922;
+}
+
+.dot.s-pending,
+.n-pod.s-pending .dot-svg {
+  background: #8c959f;
+  fill: #8c959f;
+  animation: pulse 1.2s infinite;
+}
+
+.dot.s-failed,
+.n-pod.s-failed .dot-svg {
+  background: #cf222e;
+  fill: #cf222e;
+}
+
+.dot.s-done,
+.n-pod.s-done .dot-svg {
+  background: #54aeff;
+  fill: #54aeff;
+}
+
+.dot.s-terminating,
+.n-pod.s-terminating .dot-svg {
+  background: #d0d7de;
+  fill: #d0d7de;
+}
+
+@keyframes pulse {
+  50% {
+    opacity: 0.3;
+  }
+}
+
+.shield-mini {
+  display: inline-block;
+  width: 9px;
+  height: 11px;
+  background: #6639ba;
+  clip-path: polygon(50% 0, 100% 18%, 100% 55%, 50% 100%, 0 55%, 0 18%);
+}
+
+.viz-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 12px;
+  margin-top: 10px;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.viz-legend span {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+#viz-detail {
+  margin-top: 10px;
+}
+
+.pod-detail {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 8px 10px;
+  font-size: 13px;
+}
+
+.pod-detail table {
+  border-collapse: collapse;
+  margin-top: 4px;
+}
+
+.pod-detail td {
+  padding: 2px 8px 2px 0;
+  vertical-align: top;
+}
+
+.pod-detail td:first-child {
+  color: var(--muted);
+}
+
+svg.net {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: #fcfcfd;
+  font: 11px ui-monospace, "Cascadia Code", Consolas, monospace;
+  max-width: 640px;
+}
+
+svg.net text {
+  fill: #24292f;
+}
+
+svg.net .col-head {
+  fill: var(--muted);
+  font: 600 11px system-ui, sans-serif;
+  text-transform: uppercase;
+}
+
+svg.net .g-title {
+  fill: var(--muted);
+  font-size: 10px;
+}
+
+svg.net .small {
+  font-size: 10px;
+  fill: #57606a;
+}
+
+svg.net .strong {
+  font-weight: 600;
+}
+
+svg.net rect {
+  stroke: #d0d7de;
+  fill: #fff;
+}
+
+svg.net .n-svc rect {
+  fill: #eef4ff;
+  stroke: #9db9f5;
+}
+
+svg.net .n-svc.empty rect {
+  stroke: #cf222e;
+  stroke-dasharray: 4 3;
+}
+
+svg.net .n-ing rect {
+  fill: #f6f0ff;
+  stroke: #b197e8;
+}
+
+svg.net .n-client rect {
+  fill: #f6f8fa;
+}
+
+svg.net .n-pod {
+  cursor: pointer;
+}
+
+svg.net .n-pod.sel rect {
+  stroke: var(--accent);
+  stroke-width: 2;
+}
+
+svg.net .n-pod.hl rect {
+  stroke: #6639ba;
+  stroke-width: 2;
+}
+
+svg.net .n-pod.s-terminating,
+svg.net .n-pod.gone {
+  opacity: 0.4;
+}
+
+svg.net .shield {
+  fill: #6639ba;
+}
+
+svg.net path.e-ready,
+svg.net path.e-route,
+svg.net path.e-client,
+svg.net path.e-notready {
+  fill: none;
+  stroke-width: 1.3;
+}
+
+svg.net path.e-ready {
+  stroke: #2da44e;
+}
+
+svg.net path.e-notready {
+  stroke: #d29922;
+  stroke-dasharray: 4 3;
+}
+
+svg.net path.e-route {
+  stroke: #8250df;
+}
+
+svg.net path.e-client {
+  stroke: #afb8c1;
+  stroke-dasharray: 2 3;
+}
+
+svg.net .arrow {
+  fill: #8c959f;
+}
+
+svg.net .flight.ok circle {
+  fill: #2da44e;
+}
+
+svg.net .flight.blocked circle {
+  fill: #cf222e;
+}
+
+svg.net .blocked-label {
+  fill: #cf222e;
+  font: 600 11px system-ui, sans-serif;
+  paint-order: stroke;
+  stroke: #fff;
+  stroke-width: 3px;
+}
+
+svg.net .flight circle {
+  stroke: #fff;
+  stroke-width: 1.5;
+}
+
+.policies {
+  margin: 8px 0;
+  font-size: 13px;
+}
+
+.chip {
+  font: inherit;
+  font-size: 12px;
+  padding: 2px 8px;
+  border-radius: 10px;
+  border: 1px solid #b197e8;
+  background: #fff;
+  cursor: pointer;
+}
+
+.chip.active {
+  background: #6639ba;
+  color: #fff;
+}
+
+.policy-rules {
+  font-size: 13px;
+  border-left: 3px solid #6639ba;
+  padding: 4px 10px;
+  margin: 6px 0;
+}
+
+.policy-rules ul {
+  margin: 4px 0;
+  padding-left: 18px;
+}

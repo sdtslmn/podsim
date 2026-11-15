@@ -20,6 +20,7 @@ The plan, roughly in order. Open an issue if you want to work on something or th
 - NetworkPolicy enforcement, ingress-nginx, NodePorts from the host, port-forward
 - CRDs, Helm, Kustomize, docker and podman image builds, removed API versions
 - `kubectl explain`, `debug`, `events`, `top`, `autoscale`, `auth can-i --list`
+- A live Visualizer: nodes and Pods, Services, Ingress and NetworkPolicies, with animated traffic
 - A training path of 57 labs from zero to production (beginner, intermediate, advanced, real-life scenarios), plus a CKAD track that maps them to the five exam domains, exam-skill drills and two timed mock exams with ssh hosts and automatic scoring
 
 ## v0.3: CKA track
